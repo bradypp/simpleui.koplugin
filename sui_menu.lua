@@ -862,6 +862,15 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                             plugin:_rewrapAllWidgets()
                             local ok_hs, HS = pcall(require, "sui_homescreen")
                             if ok_hs and HS then HS.refresh(true) end
+                            UIManager:show(ConfirmBox():new{
+                                text       = _("A restart is required to apply the new bar size across all layouts.\n\nRestart now?"),
+                                ok_text    = _("Restart"),
+                                cancel_text = _("Later"),
+                                ok_callback = function()
+                                    SUISettings:flush()
+                                    UIManager:restartKOReader()
+                                end,
+                            })
                         end,
                     })
                 end,
@@ -1194,16 +1203,16 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
         return items
     end
 
-    local function makeTitleBarInjMenu()
+    local function makeTitleBarSubMenu()
         local Titlebar = require("sui_titlebar")
-        local items = makeTitleBarItemsForCtx("inj")
+        local items = makeTitleBarItemsForCtx("sub")
         if #items > 0 then items[#items].separator = true end
         items[#items + 1] = {
             text           = _("Arrange Buttons"),
             enabled_func   = function() return Titlebar.isEnabled() end,
             keep_menu_open = true,
             callback       = function()
-                makeTitleBarArrangeMenu("inj", Titlebar.getInjConfig, Titlebar.saveInjConfig)
+                makeTitleBarArrangeMenu("sub", Titlebar.getSubConfig, Titlebar.saveSubConfig)
             end,
         }
         return items
@@ -1266,7 +1275,7 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
             {
                 text         = _("Sub-pages Buttons"),
                 enabled_func = function() return require("sui_titlebar").isEnabled() end,
-                sub_item_table_func = makeTitleBarInjMenu,
+                sub_item_table_func = makeTitleBarSubMenu,
             },
         }
     end
@@ -2527,6 +2536,11 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                             if not dir then return end
                             local FM = package.loaded["apps/filemanager/filemanager"]
                             if FM and FM.instance and FM.instance.file_chooser then
+                                local HS = package.loaded["sui_homescreen"]
+                                if HS and HS._instance then
+                                    HS._instance._navbar_closing_intentionally = true
+                                    require("ui/uimanager"):close(HS._instance)
+                                end
                                 FM.instance.file_chooser:changeToPath(dir)
                             end
                         end,
@@ -2808,7 +2822,11 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                                         if ok_fc and FC and FC.invalidateCache then FC.invalidateCache() end
                                         local FM = package.loaded["apps/filemanager/filemanager"]
                                         local fm_inst = FM and FM.instance
-                                        if fm_inst and fm_inst.file_chooser then fm_inst.file_chooser:refreshPath() end
+                                        if fm_inst and fm_inst.file_chooser then
+                                            fm_inst._navbar_suppress_path_change = true
+                                            fm_inst.file_chooser:refreshPath()
+                                            fm_inst._navbar_suppress_path_change = nil
+                                        end
 
                                         -- QA navbars.
                                         plugin:_rebuildAllNavbars()
@@ -3055,6 +3073,11 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                                                     if not dir then return end
                                                     local FM = package.loaded["apps/filemanager/filemanager"]
                                                     if FM and FM.instance and FM.instance.file_chooser then
+                                                    local HS = package.loaded["sui_homescreen"]
+                                                    if HS and HS._instance then
+                                                        HS._instance._navbar_closing_intentionally = true
+                                                        require("ui/uimanager"):close(HS._instance)
+                                                    end
                                                         FM.instance.file_chooser:changeToPath(dir)
                                                     end
                                                 end,
@@ -3188,7 +3211,11 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                                         if ok_fc and FC and FC.invalidateCache then FC.invalidateCache() end
                                         local FM = package.loaded["apps/filemanager/filemanager"]
                                         local fm_inst = FM and FM.instance
-                                        if fm_inst and fm_inst.file_chooser then fm_inst.file_chooser:refreshPath() end
+                                        if fm_inst and fm_inst.file_chooser then
+                                            fm_inst._navbar_suppress_path_change = true
+                                            fm_inst.file_chooser:refreshPath()
+                                            fm_inst._navbar_suppress_path_change = nil
+                                        end
 
                                         -- QA navbars
                                         plugin:_rebuildAllNavbars()
@@ -3223,18 +3250,6 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                                         end
                                         table.sort(zips, function(a, b) return a.name:lower() < b.name:lower() end)
                                     end
-
-                                    sub[#sub + 1] = {
-                                        text     = _("Open packs folder"),
-                                        callback = function()
-                                            if not dir then return end
-                                            local FM = package.loaded["apps/filemanager/filemanager"]
-                                            if FM and FM.instance and FM.instance.file_chooser then
-                                                FM.instance.file_chooser:changeToPath(dir)
-                                            end
-                                        end,
-                                        separator = #zips > 0,
-                                    }
 
                                     if #zips == 0 then
                                         sub[#sub + 1] = {
@@ -3442,7 +3457,9 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                             -- series-grouping hook (_sgProcessItemTable) runs.
                             -- updateItems alone skips that hook, so grouping would
                             -- only appear after a manual refresh.
-                            fm.file_chooser:refreshPath()
+                        fm._navbar_suppress_path_change = true
+                        fm.file_chooser:refreshPath()
+                        fm._navbar_suppress_path_change = nil
                         end
                     end
                     return {

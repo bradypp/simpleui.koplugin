@@ -22,6 +22,10 @@ local lfs             = require("libs/libkoreader-lfs")
 local util            = require("util")
 local Config          = require("sui_config")
 
+local math_floor = math.floor
+local math_max   = math.max
+local math_min   = math.min
+
 local SH = {}
 
 -- ---------------------------------------------------------------------------
@@ -70,7 +74,7 @@ end
 -- These are the 100%-scale reference values; never modify them at runtime.
 -- ---------------------------------------------------------------------------
 local _BASE_COVER_W  = Screen:scaleBySize(122)
-local _BASE_COVER_H  = math.floor(Screen:scaleBySize(122) * 3 / 2)
+local _BASE_COVER_H  = math_floor(Screen:scaleBySize(122) * 3 / 2)
 local _BASE_RECENT_W = Screen:scaleBySize(75)
 local _BASE_RECENT_H = Screen:scaleBySize(112)
 local _BASE_RB_GAP1    = Screen:scaleBySize(4)
@@ -124,17 +128,17 @@ function SH.getDims(scale, thumb_scale)
         }
     end
     -- Text/bar/gap dims scale with `scale` only — unaffected by thumb_scale.
-    local g1  = math.max(1, math.floor(_BASE_RB_GAP1    * scale))
-    local bh  = math.max(1, math.floor(_BASE_RB_BAR_H   * scale))
-    local g2  = math.max(1, math.floor(_BASE_RB_GAP2    * scale))
-    local lh  = math.max(1, math.floor(_BASE_RB_LABEL_H * scale))
+    local g1  = math_max(1, math_floor(_BASE_RB_GAP1    * scale))
+    local bh  = math_max(1, math_floor(_BASE_RB_BAR_H   * scale))
+    local g2  = math_max(1, math_floor(_BASE_RB_GAP2    * scale))
+    local lh  = math_max(1, math_floor(_BASE_RB_LABEL_H * scale))
     -- Cover dims scale with the combined scale (scale × thumb_scale).
-    local rh  = math.floor(_BASE_RECENT_H * cs)
+    local rh  = math_floor(_BASE_RECENT_H * cs)
     -- RECENT_CELL_H = cover height + bar + gaps + label — each part scaled independently.
     return {
-        COVER_W       = math.floor(_BASE_COVER_W  * cs),
-        COVER_H       = math.floor(_BASE_COVER_H  * cs),
-        RECENT_W      = math.floor(_BASE_RECENT_W * cs),
+        COVER_W       = math_floor(_BASE_COVER_W  * cs),
+        COVER_H       = math_floor(_BASE_COVER_H  * cs),
+        RECENT_W      = math_floor(_BASE_RECENT_W * cs),
         RECENT_H      = rh,
         RB_GAP1       = g1,
         RB_BAR_H      = bh,
@@ -179,7 +183,7 @@ end
 -- ---------------------------------------------------------------------------
 function SH.progressBar(w, pct, bh)
     bh = bh or Screen:scaleBySize(4)
-    local fw = math.max(0, math.floor(w * math.min(pct or 0, 1.0)))
+    local fw = math_max(0, math_floor(w * math_min(pct or 0, 1.0)))
     if fw <= 0 then
         return LineWidget:new{ dimen = Geom:new{ w = w, h = bh }, background = _CLR_BAR_BG }
     end
@@ -216,7 +220,7 @@ function SH.coverPlaceholder(title, authors, w, h)
     local width  = w - 2 * border
     local height = h - 2 * border
     -- FakeCover uses 7/8 of width for text to leave lateral breathing room
-    local text_width = math.floor(7 / 8 * width)
+    local text_width = math_floor(7 / 8 * width)
 
     -- BD-wrap title (mirrors FakeCover logic)
     local bd_wrap_title_as_filename = false
@@ -273,7 +277,7 @@ function SH.coverPlaceholder(title, authors, w, h)
         if authors then
             authors_wg = TextBoxWidget:new{
                 text      = authors,
-                face      = Font:getFace("cfont", math.max(authors_font_max - sizedec, authors_font_min)),
+                face      = Font:getFace("cfont", math_max(authors_font_max - sizedec, authors_font_min)),
                 width     = text_width,
                 alignment = "center",
                 bgcolor   = nil,
@@ -284,7 +288,7 @@ function SH.coverPlaceholder(title, authors, w, h)
         if title then
             title_wg = TextBoxWidget:new{
                 text      = title,
-                face      = Font:getFace("cfont", math.max(title_font_max - sizedec, title_font_min)),
+                face      = Font:getFace("cfont", math_max(title_font_max - sizedec, title_font_min)),
                 width     = text_width,
                 alignment = "center",
                 bgcolor   = nil,
@@ -295,7 +299,7 @@ function SH.coverPlaceholder(title, authors, w, h)
 
         local free_height = height - texts_height
         if authors then free_height = free_height - top_pad    end
-        inter_pad = math.floor(free_height / 2)
+        inter_pad = math_floor(free_height / 2)
 
         local textboxes_ok = not (authors_wg and authors_wg.has_split_inside_word)
                           and not (title_wg   and title_wg.has_split_inside_word)
@@ -351,8 +355,8 @@ end
 -- ---------------------------------------------------------------------------
 function SH.getBookCover(filepath, w, h, align, stretch_limit)
     -- Reserve 1px on each side for the border: request a bb that is 2px smaller.
-    local inner_w = math.max(1, w - 2)
-    local inner_h = math.max(1, h - 2)
+    local inner_w = math_max(1, w - 2)
+    local inner_h = math_max(1, h - 2)
     local bb = Config.getCoverBB(filepath, inner_w, inner_h, align, stretch_limit)
     if not bb then return nil end
     local ok, img = pcall(function()
@@ -380,12 +384,12 @@ end
 -- ---------------------------------------------------------------------------
 function SH.formatTimeLeft(pct, pages, avg_time)
     if not avg_time or avg_time <= 0 or not pct or pct < 0 or not pages then return nil end
-    local remaining = math.floor(pages * (1.0 - pct))
+    local remaining = math_floor(pages * (1.0 - pct))
     if remaining <= 0 then return nil end
-    local secs = math.floor(remaining * avg_time)
+    local secs = math_floor(remaining * avg_time)
     if secs <= 0 then return nil end
-    local h = math.floor(secs / 3600)
-    local m = math.floor((secs % 3600) / 60)
+    local h = math_floor(secs / 3600)
+    local m = math_floor((secs % 3600) / 60)
     if h > 0 and m > 0 then return string.format("%dh %dm", h, m)
     elseif h > 0        then return string.format("%dh", h)
     else                     return string.format("%dm", m) end

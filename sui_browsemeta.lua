@@ -748,7 +748,15 @@ function M.getAuthorBookCount(fc, author_name)
     if cached ~= nil then return cached end
 
     local files = _getMatchingFiles(base, { { "authors", author_name } })
-    local count = #files
+    local count = 0
+    for _, row in ipairs(files) do
+        local fullpath = row[1]
+        local fname    = row[2]
+        local attr = lfs.attributes(fullpath)
+        if attr and attr.mode == "file" and fc:show_file(fname, fullpath) then
+            count = count + 1
+        end
+    end
     _author_count_cache[base][author_name] = count
     return count
 end

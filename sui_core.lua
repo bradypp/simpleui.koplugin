@@ -425,8 +425,12 @@ end
 -- ---------------------------------------------------------------------------
 -- Shared helper to paint a widget with perfect alpha transparency over wallpapers
 -- ---------------------------------------------------------------------------
-function M.paintWithAlphaMask(widget, target_bb, x, y, w, h, fgcolor, custom_paint_fn)
-    local tmp_bb = Blitbuffer.new(w, h, Blitbuffer.TYPE_BB8)
+function M.paintWithAlphaMask(widget, target_bb, x, y, w, h, fgcolor, custom_paint_fn, tmp_bb)
+    local own_bb = false
+    if not tmp_bb then
+        tmp_bb = Blitbuffer.new(w, h, Blitbuffer.TYPE_BB8)
+        own_bb = true
+    end
     tmp_bb:fill(Blitbuffer.COLOR_WHITE)
     if custom_paint_fn then
         custom_paint_fn(widget, tmp_bb, 0, 0)
@@ -435,7 +439,7 @@ function M.paintWithAlphaMask(widget, target_bb, x, y, w, h, fgcolor, custom_pai
     end
     tmp_bb:invertRect(0, 0, w, h)
     target_bb:colorblitFromRGB32(tmp_bb, x, y, 0, 0, w, h, fgcolor)
-    tmp_bb:free()
+    if own_bb then tmp_bb:free() end
 end
 
 -- ---------------------------------------------------------------------------
@@ -509,7 +513,11 @@ function M.makeColoredText(opts)
         local h = self.dimen.h
         if w <= 0 or h <= 0 then return end
 
-        M.paintWithAlphaMask(self._inner, bb, x, y, w, h, self._fg)
+        if not self._tmp_bb or self._tmp_bb:getWidth() ~= w or self._tmp_bb:getHeight() ~= h then
+            if self._tmp_bb then self._tmp_bb:free() end
+            self._tmp_bb = Blitbuffer.new(w, h, Blitbuffer.TYPE_BB8)
+        end
+        M.paintWithAlphaMask(self._inner, bb, x, y, w, h, self._fg, nil, self._tmp_bb)
     end
 
     function widget:onCloseWidget() self:free() end
@@ -518,6 +526,10 @@ function M.makeColoredText(opts)
         if self._inner then
             self._inner:free()
             self._inner = nil
+        end
+        if self._tmp_bb then
+            self._tmp_bb:free()
+            self._tmp_bb = nil
         end
     end
 
@@ -590,7 +602,11 @@ function M.makeAlphaTextBox(opts)
         local w = self.dimen.w
         local h = self.dimen.h
 
-        M.paintWithAlphaMask(self._inner, bb, x, y, w, h, self._fg)
+        if not self._tmp_bb or self._tmp_bb:getWidth() ~= w or self._tmp_bb:getHeight() ~= h then
+            if self._tmp_bb then self._tmp_bb:free() end
+            self._tmp_bb = Blitbuffer.new(w, h, Blitbuffer.TYPE_BB8)
+        end
+        M.paintWithAlphaMask(self._inner, bb, x, y, w, h, self._fg, nil, self._tmp_bb)
     end
 
     function widget:onCloseWidget()
@@ -601,6 +617,10 @@ function M.makeAlphaTextBox(opts)
         if self._inner then
             self._inner:free()
             self._inner = nil
+        end
+        if self._tmp_bb then
+            self._tmp_bb:free()
+            self._tmp_bb = nil
         end
     end
 

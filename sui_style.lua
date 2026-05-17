@@ -5,7 +5,7 @@
 --   • FM titlebar home button  (KO built-in "home" icon)
 --   • SimpleUI menu button     (ko_menu  — the right titlebar button)
 --   • SimpleUI search button   (ko_search — injected search button)
---   • SimpleUI back button     (inj_back  — injected back in widgets)
+--   • SimpleUI injected menu   (sub_menu  — injected menu in widgets)
 --
 -- How it works
 -- ────────────
@@ -19,7 +19,7 @@
 -- For titlebar / search / back icons: sui_titlebar.apply() calls
 -- SUIStyle.getIcon(slot_id) when it assigns image.file to each button, and
 -- sui_titlebar.lua is modified to call the overrides.  This file therefore
--- also exposes applyToTitlebar() / applyToSearch() / applyToInjBack() helpers
+-- also exposes helper methods
 -- that sui_titlebar.lua invokes after building each button so the icons can be
 -- swapped without duplicating the button-construction logic.
 --
@@ -519,7 +519,11 @@ local function _reapplyTitlebar()
             local ok_fc, FC = pcall(require, "sui_foldercovers")
             if ok_fc and FC and FC.invalidateCache then FC.invalidateCache() end
             local fm = _fm()
-            if fm and fm.file_chooser then fm.file_chooser:refreshPath() end
+            if fm and fm.file_chooser then
+                fm._navbar_suppress_path_change = true
+                fm.file_chooser:refreshPath()
+                fm._navbar_suppress_path_change = nil
+            end
         end
     end
 
@@ -580,7 +584,11 @@ local function _reapplyTitlebar()
             local ok_fc, FC = pcall(require, "sui_foldercovers")
             if ok_fc and FC and FC.invalidateCache then FC.invalidateCache() end
             local fm = _fm()
-            if fm and fm.file_chooser then fm.file_chooser:refreshPath() end
+            if fm and fm.file_chooser then
+                fm._navbar_suppress_path_change = true
+                fm.file_chooser:refreshPath()
+                fm._navbar_suppress_path_change = nil
+            end
 
             if plugin then plugin:_rebuildAllNavbars() end
         end,
@@ -719,6 +727,7 @@ local function _initFonts()
     local Font     = _reqFont()
     local FontList = _reqFontList()
     local cre      = _reqCRE()
+    local lfs      = _reqLFS()
     if not (Font and FontList and cre) then
         _font_list = {}; _fonts = {}; _replaced = {}
         logger.warn("simpleui/style: font modules unavailable, font picker disabled")
@@ -731,7 +740,12 @@ local function _initFonts()
 
     -- Build the set of paths that will be accepted as valid font sources.
     local path_set = {}
-    for _, p in ipairs(FontList.fontlist) do path_set[p] = true end
+    for _, p in ipairs(FontList.fontlist) do 
+        -- Verify the file still exists on disk, as FontList caches paths across restarts.
+        if not lfs or lfs.attributes(p, "mode") == "file" then
+            path_set[p] = true 
+        end
+    end
 
     -- Walk CRE's font face list and keep only those whose file is in path_set.
     for _, name in ipairs(cre.getFontFaces()) do
@@ -831,7 +845,12 @@ function M.applyUIFont()
     _ensureFonts()
     if SUISettings:isTrue(_FONT_KEY_ENABLED) then
         local name = SUISettings:get(_FONT_KEY_NAME) or _FONT_DEFAULT
-        _applyFont(name)
+        if _fonts and _fonts[name] then
+            _applyFont(name)
+        else
+            logger.warn("simpleui/style: active UI font not found on disk, disabling custom font:", name)
+            SUISettings:set(_FONT_KEY_ENABLED, false)
+        end
     end
 end
 
@@ -1387,10 +1406,8 @@ local function _applyFromDir(pack_dir)
     local done_keys = {}
 
     for slot_id, rel_fname in pairs(file_map) do
-        local is_sys = false
-        for _, s in ipairs(M.SLOTS) do if s.id == slot_id then is_sys = true; break end end
-        if is_sys then
-            local settings_key = "simpleui_sysicon_" .. slot_id
+        local settings_key = _filenameToKey(slot_id)
+        if settings_key then
             local full_path    = pack_dir .. "/" .. rel_fname
             if lfs.attributes(full_path, "mode") == "file" then
                 SUISettings:set(settings_key, full_path)

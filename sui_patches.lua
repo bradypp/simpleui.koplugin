@@ -1353,8 +1353,8 @@ function M.patchUIManagerShow(plugin)
             widget._navbar_height_reduced = true
         end
 
-        -- Apply title-bar customisations for injected widgets.
-        Titlebar().applyToInjected(widget)
+        -- Apply title-bar customisations for sub-pages widgets.
+        Titlebar().applyToSub(widget)
 
         local tabs      = Config.loadTabConfig()
         local tabs_set  = tabsToSet(tabs)
@@ -1452,7 +1452,7 @@ function M.patchUIManagerShow(plugin)
                 local zone_ratio_h
                 if SUISettings:nilOrTrue("simpleui_topbar_enabled") then
                     local Topbar = require("sui_topbar")
-                    zone_ratio_h = (Topbar.TOTAL_TOP_H() + UI.MOD_GAP) / screen_h
+                    zone_ratio_h = Topbar.TOTAL_TOP_H() / screen_h
                 else
                     zone_ratio_h = DTAP_ZONE_MENU.h
                 end
@@ -1463,7 +1463,7 @@ function M.patchUIManagerShow(plugin)
                 -- we must let their taps fall through rather than opening the menu.
                 -- We prefer button.dimen (populated after the first paint) and fall
                 -- back to the overlap_offset + width values we set explicitly.
-                local function _tapOnInjectedBtn(ges)
+                local function _tapOnSubBtn(ges)
                     local pos = ges.pos
                     if not pos then return false end
                     local tb = widget.title_bar
@@ -1472,7 +1472,7 @@ function M.patchUIManagerShow(plugin)
                     if tb and tb.left_button  then btns[#btns+1] = tb.left_button end
                     if tb and tb.right_button then btns[#btns+1] = tb.right_button end
                     local logger = require("logger")
-                    logger.dbg("simpleui _tapOnInjectedBtn: pos=", pos.x, pos.y, "n_btns=", #btns)
+                    logger.dbg("simpleui _tapOnSubBtn: pos=", pos.x, pos.y, "n_btns=", #btns)
                     for i, btn in ipairs(btns) do
                         local hit = false
                         local bw = btn.width or (btn.dimen and btn.dimen.w) or 0
@@ -1509,8 +1509,8 @@ function M.patchUIManagerShow(plugin)
                         handler     = function(ges)
                             local logger = require("logger")
                             logger.dbg("simpleui_menu_tap FIRED pos=", ges.pos and ges.pos.x, ges.pos and ges.pos.y)
-                            if _tapOnInjectedBtn(ges) then
-                                logger.dbg("simpleui_menu_tap: btn hit, passing through")
+                            if _tapOnSubBtn(ges) then
+                                logger.dbg("simpleui_menu_tap: sub btn hit, passing through")
                                 return false
                             end
                             local m = _fmMenu(); if m then return m:onTapShowMenu(ges) end
@@ -1854,7 +1854,7 @@ function M.patchUIManagerClose(plugin)
                             -- setActiveAndRefreshFM + setDirty(FM) — the FM is covered by HS
                             -- and its bar will be corrected by _restoreTabInFM when HS closes.
                             local _ao2 = { bookmark_browser=true, wifi_toggle=true, frontlight=true, power=true }
-                            if not _ao2[plugin.active_action] then
+                        if plugin.active_action == nil or not _ao2[plugin.active_action] then
                                 plugin.active_action = "homescreen"
                             end
                             -- Lazy refresh: the user is looking at the HS, not the FM
@@ -1962,12 +1962,21 @@ function M.patchMenuInitForPagination(plugin)
             return
         end
 
-        -- Collections widgets use the native page_return_arrow inside return_button
-        -- (a BottomContainer managed entirely by Menu). Leave their layout untouched.
-        if menu_self.name == "collections" or menu_self.name == "coll_list" then return end
+        -- Collections widgets historically kept their layout untouched because the
+        -- native page_return_arrow lived inside return_button and was needed for
+        -- back-navigation. Since sui_titlebar.applyToSub now suppresses both
+        -- return_button and page_return_arrow (and owns back-navigation via
+        -- sub_back_btn), that concern no longer applies.
+        --
+        -- When navpager is active:  strip the page_info bar from collections too,
+        -- so the behaviour matches FM / History (navpager owns pagination).
+        -- When navpager is inactive: keep the original exclusion so collections
+        -- retain their native pagination bar (sub_back is not a pager in that case).
+        local is_coll = menu_self.name == "collections" or menu_self.name == "coll_list"
+        if is_coll and not Config.isNavpagerEnabled() then return end
 
         -- Remove all children except content_group to strip the pagination row
-        -- (page_info, return_button, etc.) for non-collection targets.
+        -- (page_info, return_button, etc.).
         local content = menu_self[1] and menu_self[1][1]
         if content then
             for i = #content, 1, -1 do
@@ -2091,26 +2100,42 @@ function M.patchMenuForNavpager(plugin)
 
         if not _subtitleEnabled() then return end
 
-        -- Snapshot page state now to avoid races with a second updatePageInfo
-        -- call that may fire during the same tick (switchItemTable init).
+        -- Read page state synchronously, exactly as the native bar does:
+        -- orig_updatePageInfo has already run _recalculateDimen, so page and
+        -- page_num are authoritative at this point.
         local captured_page     = menu_self.page     or 0
         local captured_page_num = menu_self.page_num or 0
 
         -- Update the subtitle synchronously.
         _setPageSubtitle(menu_self.title_bar, captured_page, captured_page_num)
 
-        -- Coalesce arrow updates: skip if one is already queued.
+        -- Navpager arrow update: coalesce multiple calls within the same tick,
+        -- but read page/page_num from menu_self at execution time (not from the
+        -- snapshot above). This mirrors the native bar's logic — it always reads
+        -- self.page and self.page_num at the moment it runs — and avoids stale
+        -- snapshots when switchItemTable fires updatePageInfo before UIManager:show
+        -- (e.g. Collections, History), or when a second call in the same tick
+        -- would overwrite a pending snapshot with wrong values.
+        --
+        -- The reference to menu_self is safe: the closure only executes one tick
+        -- later while the widget is alive (it was just shown or just updated).
         if _navpager_rebuild_pending then return end
         _navpager_rebuild_pending = true
-
-        local has_prev = captured_page > 1
-        local has_next = captured_page < captured_page_num
 
         UIManager:scheduleIn(0, function()
             _navpager_rebuild_pending = false
             if not SUISettings:isTrue("simpleui_bar_navpager_enabled") then return end
             local fm = plugin.ui
             if not (fm and fm._navbar_container) then return end
+            -- Re-read page state from the live widget at execution time.
+            -- This is the same source of truth the native bar uses and guarantees
+            -- correctness regardless of when updatePageInfo was called relative
+            -- to UIManager:show (Collections/History call switchItemTable before
+            -- show, so the snapshot taken above may precede the final page_num).
+            local live_page     = menu_self.page     or 0
+            local live_page_num = menu_self.page_num or 0
+            local has_prev = live_page > 1
+            local has_next = live_page < live_page_num
             local target = _getNavbarTarget(fm)
             if not Bottombar.updateNavpagerArrows(target, has_prev, has_next) then
                 local tabs    = Config.loadTabConfig()
@@ -2927,8 +2952,20 @@ function M.patchWallpaperFM(plugin)
                 return orig_tbw_pt(tbw_self, bb, x, y)
             end
 
+            if not tbw_self._sui_tmp_bb or tbw_self._sui_tmp_bb:getWidth() ~= w or tbw_self._sui_tmp_bb:getHeight() ~= h then
+                if tbw_self._sui_tmp_bb then tbw_self._sui_tmp_bb:free() end
+                tbw_self._sui_tmp_bb = Blitbuffer.new(w, h, Blitbuffer.TYPE_BB8)
+            end
+
             local fgcolor = tbw_self.fgcolor or Blitbuffer.COLOR_BLACK
-        require("sui_core").paintWithAlphaMask(tbw_self, bb, x, y, w, h, fgcolor, orig_tbw_pt)
+            UI.paintWithAlphaMask(tbw_self, bb, x, y, w, h, fgcolor, orig_tbw_pt, tbw_self._sui_tmp_bb)
+        end
+
+        local orig_tbw_free = TextBoxWidget.free
+        plugin._orig_wp_tbw_free = orig_tbw_free
+        TextBoxWidget.free = function(tbw_self)
+            if tbw_self._sui_tmp_bb then tbw_self._sui_tmp_bb:free(); tbw_self._sui_tmp_bb = nil end
+            if orig_tbw_free then orig_tbw_free(tbw_self) end
         end
     end
 
@@ -3358,6 +3395,10 @@ function M.teardownAll(plugin)
     if TBW_wp and plugin._orig_wp_tbw_paintTo then
         TBW_wp.paintTo              = plugin._orig_wp_tbw_paintTo
         plugin._orig_wp_tbw_paintTo = nil
+    end
+    if TBW_wp and plugin._orig_wp_tbw_free then
+        TBW_wp.free                 = plugin._orig_wp_tbw_free
+        plugin._orig_wp_tbw_free    = nil
     end
 
     -- Restore wallpaper ProgressWidget:paintTo patch.

@@ -2536,8 +2536,6 @@ msgstr "Pacotes de Ícones  (%d)"
 msgid "Install pack from ZIP…"
 msgstr "Instalar pacote a partir de ZIP…"
 
-msgid "Open packs folder"
-msgstr "Abrir pasta de pacotes"
 
 msgid "No packs found.\nPlace a folder or .zip in:\n%1"
 msgstr "Nenhum pacote encontrado.\nColoque uma pasta ou .zip em:\n%1"
@@ -2658,3 +2656,6 @@ msgstr "Capas de Pastas: Pasta Vazia"
 
 msgid "Reset All Quick Action Icons"
 msgstr "Redefinir Todos os Ícones de Ações Rápidas"
+
+msgid "More by %s (%d)"
+msgstr "Mais de %s (%d)"

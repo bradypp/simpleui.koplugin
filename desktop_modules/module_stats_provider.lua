@@ -53,17 +53,6 @@ local function rownum(v)
     return tonumber(v or 0) or 0
 end
 
--- Computes the unix timestamp of the start of the current local day (00:00:00).
-local function startOfToday(t)
-    -- t is os.date("*t") — already computed by the caller
-    return os.time() - (t.hour * 3600 + t.min * 60 + t.sec)
-end
-
--- Computes the unix timestamp of 00:00:00 on January 1 of the current year.
-local function startOfYear(t)
-    return os.time{ year = t.year, month = 1, day = 1, hour = 0, min = 0, sec = 0 }
-end
-
 -- ---------------------------------------------------------------------------
 -- Query 1: all time-series stats in a single pass over page_stat_data.
 --
@@ -212,6 +201,26 @@ end
 -- ---------------------------------------------------------------------------
 local _MAX_HIST = 200   -- hard cap: avoids unbounded scan on huge histories
 
+-- modifiedInYear: KOReader always writes `modified` as an ISO-8601 string
+-- ("YYYY-MM-DD ..."), a unix timestamp (number), or an os.date("*t") table.
+local function _modifiedInYear(summary, year_str)
+    local mod = summary and summary.modified
+    if mod == nil then return false end
+    if type(mod) == "number" then
+        -- Unix timestamp: compare year component directly without os.date.
+        local mod_t = os.date("*t", mod)
+        return mod_t and tostring(mod_t.year) == year_str
+    end
+    if type(mod) == "string" then
+        -- ISO-8601 "YYYY-MM-DD..." — prefix check is sufficient and free.
+        return #mod >= 4 and mod:sub(1, 4) == year_str
+    end
+    if type(mod) == "table" and mod.year then
+        return tostring(mod.year) == year_str
+    end
+    return false
+end
+
 local function countMarkedReadBoth(year_str)
     local books_year  = 0
     local books_total = 0
@@ -232,30 +241,6 @@ local function countMarkedReadBoth(year_str)
         logger.warn("simpleui: stats_provider: module_books_shared not loaded — sidecar cache unavailable")
     end
 
-    -- modifiedInYear: KOReader always writes `modified` as an ISO-8601 string
-    -- ("YYYY-MM-DD ..."), a unix timestamp (number), or an os.date("*t") table.
-    -- The string case is handled by a direct sub(1,4) prefix check — no pcall,
-    -- os.time, or os.date needed. The legacy pcall branch is omitted: if the
-    -- string doesn't start with the year it cannot match, and malformed dates
-    -- are treated as not-in-year (safe default).
-    local function modifiedInYear(summary)
-        local mod = summary and summary.modified
-        if mod == nil then return false end
-        if type(mod) == "number" then
-            -- Unix timestamp: compare year component directly without os.date.
-            local mod_t = os.date("*t", mod)
-            return mod_t and tostring(mod_t.year) == year_str
-        end
-        if type(mod) == "string" then
-            -- ISO-8601 "YYYY-MM-DD..." — prefix check is sufficient and free.
-            return #mod >= 4 and mod:sub(1, 4) == year_str
-        end
-        if type(mod) == "table" and mod.year then
-            return tostring(mod.year) == year_str
-        end
-        return false
-    end
-
     local limit = math.min(#ReadHistory.hist, _MAX_HIST)
     for i = 1, limit do
         local entry = ReadHistory.hist[i]
@@ -274,14 +259,16 @@ local function countMarkedReadBoth(year_str)
                         summary = ds:readSetting("summary")
                         -- Populate the shared cache so subsequent renders skip DS.open.
                         if SH._cachePut then
+                            local doc_props = ds:readSetting("doc_props")
+                            local stats = ds:readSetting("stats")
                             local data = {
                                 percent              = ds:readSetting("percent_finished") or 0,
-                                title                = (ds:readSetting("doc_props") or {}).title,
-                                authors              = (ds:readSetting("doc_props") or {}).authors,
+                                title                = doc_props and doc_props.title,
+                                authors              = doc_props and doc_props.authors,
                                 doc_pages            = ds:readSetting("doc_pages"),
                                 partial_md5_checksum = ds:readSetting("partial_md5_checksum"),
-                                stat_pages           = (ds:readSetting("stats") or {}).pages,
-                                stat_total_time      = (ds:readSetting("stats") or {}).total_time_in_sec,
+                                stat_pages           = stats and stats.pages,
+                                stat_total_time      = stats and stats.total_time_in_sec,
                                 summary              = summary,
                             }
                             SH._cachePut(fp, ds.source_candidate, data)
@@ -300,7 +287,7 @@ local function countMarkedReadBoth(year_str)
 
             if type(summary) == "table" and summary.status == "complete" then
                 books_total = books_total + 1
-                if modifiedInYear(summary) then
+                if _modifiedInYear(summary, year_str) then
                     books_year = books_year + 1
                 end
             end
@@ -337,7 +324,8 @@ function SP.get(db_conn, year_str, needs_books)
     -- Single os.date("*t") call — derive today_str from the same table to
     -- avoid a second os.date("%Y-%m-%d") syscall. string.format is faster
     -- than os.date for simple date formatting in LuaJIT.
-    local t           = os.date("*t")
+    local now         = os.time()
+    local t           = os.date("*t", now)
     local today_str   = string.format("%04d-%02d-%02d", t.year, t.month, t.day)
 
     -- Cache hit: same calendar day, data already fetched.
@@ -374,7 +362,7 @@ function SP.get(db_conn, year_str, needs_books)
     end
 
     -- Compute timestamps once — shared by all sub-queries.
-    local start_today = os.time() - (t.hour * 3600 + t.min * 60 + t.sec)
+    local start_today = now - (t.hour * 3600 + t.min * 60 + t.sec)
     local week_start  = start_today - 6 * 86400
     local year_start  = os.time{ year = t.year, month = 1, day = 1,
                                   hour = 0,     min  = 0,  sec = 0 }
@@ -523,7 +511,8 @@ function SP.invalidateTimeSeries()
     -- just been broken or extended — we must re-fetch.
     -- We compute today_str here with the same string.format pattern used in
     -- SP.get() to avoid an os.date call; os.time() is a single syscall.
-    local t = os.date("*t")
+    local now = os.time()
+    local t = os.date("*t", now)
     local today_str = string.format("%04d-%02d-%02d", t.year, t.month, t.day)
     if _cache_day == today_str then
         -- Same day: streak cannot have changed — preserve it.

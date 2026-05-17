@@ -252,21 +252,23 @@ function M.patchDimmedIcon(btn)
     lw._sui_dim_patched = true
     local orig_lw_pt = lw.paintTo
     local Blitbuffer = require("ffi/blitbuffer")
+    local UI_core    = require("sui_core")
     lw.paintTo = function(self_lw, bb, x, y)
         if not btn.enabled then
             local sz = self_lw:getSize()
             local w, h = sz.w, sz.h
             if w > 0 and h > 0 then
-                local tmp_bb = Blitbuffer.new(w, h, Blitbuffer.TYPE_BB8)
-                tmp_bb:fill(Blitbuffer.COLOR_WHITE)
-                
+                if not self_lw._sui_tmp_bb or self_lw._sui_tmp_bb:getWidth() ~= w or self_lw._sui_tmp_bb:getHeight() ~= h then
+                    if self_lw._sui_tmp_bb then self_lw._sui_tmp_bb:free() end
+                    self_lw._sui_tmp_bb = Blitbuffer.new(w, h, Blitbuffer.TYPE_BB8)
+                end
                 local saved_dim = self_lw.dim
                 local saved_orig_nm = self_lw.original_in_nightmode
                 self_lw.dim = nil
                 self_lw.original_in_nightmode = true
                 
                 local fg = _getInactiveColor()
-                require("sui_core").paintWithAlphaMask(self_lw, bb, x, y, w, h, fg, orig_lw_pt)
+                UI_core.paintWithAlphaMask(self_lw, bb, x, y, w, h, fg, orig_lw_pt, self_lw._sui_tmp_bb)
 
                 self_lw.dim = saved_dim
                 self_lw.original_in_nightmode = saved_orig_nm
@@ -274,6 +276,11 @@ function M.patchDimmedIcon(btn)
             end
         end
         orig_lw_pt(self_lw, bb, x, y)
+    end
+    local orig_lw_free = lw.free
+    lw.free = function(self_lw)
+        if self_lw._sui_tmp_bb then self_lw._sui_tmp_bb:free(); self_lw._sui_tmp_bb = nil end
+        if orig_lw_free then orig_lw_free(self_lw) end
     end
 end
 
@@ -438,16 +445,22 @@ local function _makeColoredIcon(file, size, fgcolor)
     widget._inner = inner
     widget._fg = fgcolor
 
+    local UI_core = require("sui_core")
     function widget:getSize() return self.dimen end
     function widget:paintTo(bb, x, y)
         self.dimen.x, self.dimen.y = x, y
         local w, h = self.dimen.w, self.dimen.h
         if w <= 0 or h <= 0 then return end
         
-        require("sui_core").paintWithAlphaMask(self._inner, bb, x, y, w, h, self._fg)
+        if not self._tmp_bb or self._tmp_bb:getWidth() ~= w or self._tmp_bb:getHeight() ~= h then
+            if self._tmp_bb then self._tmp_bb:free() end
+            self._tmp_bb = Blitbuffer.new(w, h, Blitbuffer.TYPE_BB8)
+        end
+        UI_core.paintWithAlphaMask(self._inner, bb, x, y, w, h, self._fg, nil, self._tmp_bb)
     end
     function widget:free()
         if self._inner then self._inner:free(); self._inner = nil end
+        if self._tmp_bb then self._tmp_bb:free(); self._tmp_bb = nil end
     end
     function widget:onToggleNightMode() require("ui/uimanager"):setDirty(self) end
     function widget:onSetNightMode()    require("ui/uimanager"):setDirty(self) end

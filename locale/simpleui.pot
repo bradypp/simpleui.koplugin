@@ -2721,8 +2721,6 @@ msgstr ""
 msgid "Install pack from ZIP…"
 msgstr ""
 
-msgid "Open packs folder"
-msgstr ""
 
 msgid "No packs found.\nPlace a folder or .zip in:\n%1"
 msgstr ""
@@ -2842,4 +2840,7 @@ msgid "Folder Covers: Empty Folder"
 msgstr ""
 
 msgid "Reset All Quick Action Icons"
+msgstr ""
+
+msgid "More by %s (%d)"
 msgstr ""

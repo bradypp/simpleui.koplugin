@@ -446,6 +446,84 @@ function SimpleUIPlugin:init()
             SUISettings:flush()
         end
         -- -------------------------------------------------------------------
+        -- Settings migration v5: standardize titlebar button nomenclature
+        -- -------------------------------------------------------------------
+        if not SUISettings:isTrue("simpleui_settings_migrated_v5") then
+            pcall(function()
+                local renames = {
+                    { "simpleui_tb_item_menu_button",     "simpleui_tb_item_fm_menu" },
+                    { "simpleui_tb_item_up_button",       "simpleui_tb_item_fm_back" },
+                    { "simpleui_tb_item_search_button",   "simpleui_tb_item_fm_search" },
+                    { "simpleui_tb_item_browse_button",   "simpleui_tb_item_fm_browse" },
+                    { "simpleui_tb_item_title",           "simpleui_tb_item_fm_title" },
+                    { "simpleui_tb_item_inj_back",        "simpleui_tb_item_sub_menu" },
+                    { "simpleui_tb_item_inj_right",       "simpleui_tb_item_sub_close" },
+                    { "simpleui_tb_item_inj_menubutton",  "simpleui_tb_item_sub_menu" },
+                    { "simpleui_tb_item_inj_closebutton", "simpleui_tb_item_sub_close" },
+                    { "simpleui_tb_inj_cfg",              "simpleui_tb_sub_cfg" },
+                }
+                local migrated = 0
+                for _, pair in ipairs(renames) do
+                    local old_k, new_k = pair[1], pair[2]
+                    local val = SUISettings:get(old_k)
+                    if val ~= nil then
+                        if SUISettings:get(new_k) == nil then
+                            SUISettings:set(new_k, val)
+                        end
+                        SUISettings:del(old_k)
+                        migrated = migrated + 1
+                    end
+                end
+
+                local function map_cfg(cfg_key, mapping)
+                    local cfg = SUISettings:get(cfg_key)
+                    if type(cfg) == "table" then
+                        local changed = false
+                        local function map_arr(arr)
+                            for i, v in ipairs(arr) do
+                                if mapping[v] then arr[i] = mapping[v]; changed = true end
+                            end
+                        end
+                        if type(cfg.side) == "table" then
+                            for old_btn, new_btn in pairs(mapping) do
+                                if cfg.side[old_btn] ~= nil then
+                                    cfg.side[new_btn] = cfg.side[old_btn]
+                                    cfg.side[old_btn] = nil
+                                    changed = true
+                                end
+                            end
+                        end
+                        if type(cfg.order_left) == "table" then map_arr(cfg.order_left) end
+                        if type(cfg.order_right) == "table" then map_arr(cfg.order_right) end
+                        if changed then
+                            SUISettings:set(cfg_key, cfg)
+                            migrated = migrated + 1
+                        end
+                    end
+                end
+
+                local fm_map = {
+                    menu_button   = "fm_menu",
+                    up_button     = "fm_back",
+                    search_button = "fm_search",
+                    browse_button = "fm_browse",
+                    title         = "fm_title"
+                }
+                local sub_map = {
+                    inj_back         = "sub_menu",
+                    inj_right        = "sub_close",
+                    inj_menubutton   = "sub_menu",
+                    inj_closebutton  = "sub_close"
+                }
+                map_cfg("simpleui_tb_fm_cfg", fm_map)
+                map_cfg("simpleui_tb_sub_cfg", sub_map)
+
+                logger.info("simpleui: settings migration v5 complete —", migrated, "titlebar keys renamed")
+            end)
+            SUISettings:set("simpleui_settings_migrated_v5", true)
+            SUISettings:flush()
+        end
+        -- -------------------------------------------------------------------
 
         Config.applyFirstRunDefaults()
         Config.migrateOldCustomSlots()
