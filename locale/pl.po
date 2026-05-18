@@ -2669,7 +2669,7 @@ msgid ""
 "Navpager enables this automatically.\n"
 "Not available when Navpager is active."
 msgstr ""
-"Wyświetla „Strona X z Y” w podtytule paska tytułu podczas przeglądania biblioteki, historii lub kolekcji.\n"
+"Wyświetla \"Strona X z Y\" w podtytule paska tytułu podczas przeglądania biblioteki, historii lub kolekcji.\n"
 "Navpager włącza to automatycznie.\n"
 "Niedostępne gdy Navpager jest aktywny."
 
@@ -2820,7 +2820,7 @@ msgid ""
 msgstr ""
 "Po włączeniu, otwieranie przeglądarki plików po zakończeniu lub zamknięciu książki powoduje przejście do folderu, w którym znajduje się książka, co odpowiada natywnemu zachowaniu KOReader.\n"
 "Po wyłączeniu (domyślnie) SimpleUI zawsze wraca do katalogu głównego biblioteki.\n"
-"Ta opcja działa niezależnie od „Zacznij od Ekranu głównego”."
+"Ta opcja działa niezależnie od \"Zacznij od Ekranu głównego\"."
 
 #: sui_menu.lua:2724
 msgid "hidden"
@@ -2953,7 +2953,7 @@ msgid ""
 "A preset named \"%s\" already exists.\n"
 "Overwrite it?"
 msgstr ""
-"Preset o nazwie „%s” już istnieje.\n"
+"Preset o nazwie \"%s\" już istnieje.\n"
 "Nadpisać?"
 
 #: sui_style.lua:83
@@ -2998,7 +2998,7 @@ msgstr "Przycisk Menu"
 
 #: sui_menu.lua:2946
 msgid "Overwrite preset \"%s\" with the current icon settings?"
-msgstr "Nadpisać preset „%s” aktualnymi ustawieniami ikon?"
+msgstr "Nadpisać preset \"%s\" aktualnymi ustawieniami ikon?"
 
 #: sui_menu.lua:2633
 msgid "Homepage Presets  (%d)"
@@ -3117,7 +3117,7 @@ msgid ""
 "Pack \"%s\" installed.\n"
 "You can now apply it from the list."
 msgstr ""
-"Paczka „%s” zainstalowana.\n"
+"Paczka \"%s\" zainstalowana.\n"
 "Możesz ją teraz zastosować z listy."
 
 #: sui_menu.lua:3275
@@ -3129,7 +3129,7 @@ msgid ""
 "Pack \"%s\" applied.\n"
 "%d icons replaced."
 msgstr ""
-"Paczka „%s” zastosowana.\n"
+"Paczka \"%s\" zastosowana.\n"
 "Zastąpiono %d ikon."
 
 #: sui_menu.lua:3314
@@ -3174,7 +3174,7 @@ msgstr "Importuj preset…"
 
 #: sui_menu.lua:2564 sui_menu.lua:3101
 msgid "Preset \"%s\" imported."
-msgstr "Preset „%s” zaimportowany."
+msgstr "Preset \"%s\" zaimportowany."
 
 #: sui_menu.lua:2569 sui_menu.lua:3106
 msgid "Error importing preset: "
@@ -3287,7 +3287,7 @@ msgstr "Więcej od %s (%d)"
 
 #: sui_menu.lua:2460 sui_menu.lua:3002
 msgid "A preset named \"%s\" already exists."
-msgstr "Preset o nazwie „%s” już istnieje."
+msgstr "Preset o nazwie \"%s\" już istnieje."
 
 #: sui_quickactions.lua:489
 msgid "Action error: %s"
@@ -3307,7 +3307,7 @@ msgstr "Nie można otworzyć pliku ZIP (nieprawidłowy format lub uszkodzony)"
 
 #: sui_menu.lua:2500 sui_menu.lua:3040
 msgid "Delete preset \"%s\"?"
-msgstr "Usunąć preset „%s”?"
+msgstr "Usunąć preset \"%s\"?"
 
 #: sui_style.lua:1212
 msgid ""
@@ -3373,7 +3373,7 @@ msgstr "Nie znaleziono paczek."
 
 #: sui_menu.lua:2399
 msgid "Overwrite preset \"%s\" with the current homescreen settings?"
-msgstr "Nadpisać preset „%s” aktualnymi ustawieniami ekranu głównego?"
+msgstr "Nadpisać preset \"%s\" aktualnymi ustawieniami ekranu głównego?"
 
 #: sui_style.lua:1508
 msgid "Pack folder not accessible: "
@@ -3393,19 +3393,19 @@ msgstr "Umieść folder lub plik .zip w:"
 
 #: sui_menu.lua:2309 sui_menu.lua:2866
 msgid "Preset \"%s\" not found."
-msgstr "Nie znaleziono presetu „%s”."
+msgstr "Nie znaleziono presetu \"%s\"."
 
 #: sui_menu.lua:2358 sui_menu.lua:2910
 msgid "Preset \"%s\" saved."
-msgstr "Preset „%s” zapisany."
+msgstr "Preset \"%s\" zapisany."
 
 #: sui_menu.lua:2408 sui_menu.lua:2954
 msgid "Preset \"%s\" updated."
-msgstr "Preset „%s” zaktualizowany."
+msgstr "Preset \"%s\" zaktualizowany."
 
 #: sui_menu.lua:2435 sui_menu.lua:2981
 msgid "Rename \"%s\""
-msgstr "Zmień nazwę „%s”"
+msgstr "Zmień nazwę \"%s\""
 
 #: sui_style.lua:1506
 msgid "Unsupported format (use a folder or a .zip file)"
