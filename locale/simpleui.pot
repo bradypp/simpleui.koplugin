@@ -1183,7 +1183,7 @@ msgid "No collections selected"
 msgstr ""
 
 #: desktop_modules/module_quote.lua:831
-msgid "No custom quotes found. Add a .lua file to the plugin\'s desktop_modules/custom_quotes/ folder and select it in Settings."
+msgid "No custom quotes found. Add a .lua file to the plugin's sui_quotes/ folder and select it in Settings."
 msgstr ""
 
 #: sui_updater.lua:480
@@ -1347,7 +1347,8 @@ msgid "Physical books read this year:"
 msgstr ""
 
 #: desktop_modules/module_quote.lua:1306
-msgid "Place .lua files in the plugin's desktop_modules/custom_quotes/ folder"
+msgid "No .lua files found in sui_quotes/"
+msgid "Place .lua files in the plugin's sui_quotes/ folder"
 msgstr ""
 
 #: sui_menu.lua:2395
@@ -2187,6 +2188,12 @@ msgid "  (%d left)"
 msgid_plural "  (%d left)"
 msgstr[0] ""
 msgstr[1] ""
+
+msgid "Frame"
+msgstr ""
+
+msgid "Solid Background"
+msgstr ""
 
 #: desktop_modules/module_reading_goals.lua:626
 msgid "  Set Goal  (%d book in %s)"

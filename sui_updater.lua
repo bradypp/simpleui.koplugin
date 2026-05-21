@@ -55,7 +55,7 @@ local _latest_ver   = nil  -- string without "v", or nil
 local _dl_url       = nil  -- URL for the asset ZIP, or nil
 
 -- Plugin directory — resolved once at module load time.
-local _plugin_dir = (debug.getinfo(1, "S").source or ""):match("^@(.+)/[^/]+$")
+local _plugin_dir = (debug.getinfo(1, "S").source or ""):match("^@?(.+)/[^/]+$")
     or "/mnt/us/extensions/simpleui.koplugin"
 
 -- ---------------------------------------------------------------------------
@@ -67,9 +67,10 @@ local function _currentVersion()
     -- _meta.lua, not a stale cached entry from another plugin (require caches
     -- by module name, so require("_meta") may return the wrong table).
     local ok, meta = pcall(dofile, _plugin_dir .. "/_meta.lua")
-    if ok and type(meta) == "table" and meta.version then return meta.version end
+    if ok and type(meta) == "table" and meta.name == "simpleui" and meta.version then return meta.version end
     local rok, rmeta = pcall(require, "_meta")
-    return (rok and rmeta and rmeta.version) or "0.0.0"
+    if rok and type(rmeta) == "table" and rmeta.name == "simpleui" and rmeta.version then return rmeta.version end
+    return "0.0.0"
 end
 
 -- Returns true if version `a` is strictly greater than `b`.

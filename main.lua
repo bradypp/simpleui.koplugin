@@ -84,8 +84,21 @@ function SimpleUIPlugin:init()
         -- Detect hot update: compare the version now on disk with what was
         -- running last session. If they differ, warn the user to restart so
         -- that all plugin modules are loaded fresh.
-        local meta_ok, meta = pcall(require, "_meta")
-        local current_version = meta_ok and meta and meta.version
+        local current_version
+        local src = debug.getinfo(1, "S").source or ""
+        local p_root = src:match("^@?(.+)/[^/]+$")
+        if p_root then
+            local ok, meta = pcall(dofile, p_root .. "/_meta.lua")
+            if ok and type(meta) == "table" and meta.name == "simpleui" then
+                current_version = meta.version
+            end
+        end
+        if not current_version then
+            local meta_ok, meta = pcall(require, "_meta")
+            if meta_ok and type(meta) == "table" and meta.name == "simpleui" then
+                current_version = meta.version
+            end
+        end
         -- Read version from SUISettings; fall back to G_reader_settings for the
         -- first boot after the Phase-4 migration (before v2 migration has run).
         local prev_version = SUISettings:get("simpleui_loaded_version")
@@ -1417,6 +1430,16 @@ function SimpleUIPlugin:onCloseDocument()
     local mod_rs = Registry.get("reading_stats")
     local stats_active = (mod_rg and Registry.isEnabled(mod_rg, PFX))
         or (mod_rs and mod_rs.isEnabled and mod_rs.isEnabled(PFX))
+
+    if not stats_active then
+        for _, mod in ipairs(Registry.list()) do
+            if mod.needs and mod.needs.stats and Registry.isEnabled(mod, PFX) then
+                stats_active = true
+                break
+            end
+        end
+    end
+
     if stats_active then
         local SP = package.loaded["desktop_modules/module_stats_provider"]
         if SP then

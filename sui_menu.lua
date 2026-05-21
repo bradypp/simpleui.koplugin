@@ -4010,11 +4010,11 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                 text                = _("About"),
                 separator           = true,
                 sub_item_table_func = function()
-                    local _plugin_dir = (debug.getinfo(1, "S").source or ""):match("^@(.+)/[^/]+$")
+                    local _plugin_dir = (debug.getinfo(1, "S").source or ""):match("^@?(.+)/[^/]+$")
                     local ok, Meta = pcall(dofile, _plugin_dir .. "/_meta.lua")
-                    if not ok or type(Meta) ~= "table" then
+                    if not ok or type(Meta) ~= "table" or Meta.name ~= "simpleui" then
                         local rok, rmeta = pcall(require, "_meta")
-                        Meta = (rok and rmeta) or {}
+                        Meta = (rok and type(rmeta) == "table" and rmeta.name == "simpleui" and rmeta) or {}
                     end
                     return {
                         {

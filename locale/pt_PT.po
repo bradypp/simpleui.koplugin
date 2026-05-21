@@ -925,8 +925,8 @@ msgid "Next"
 msgstr "Seguinte"
 
 #: desktop_modules/module_quote.lua:1275
-msgid "No .lua files found in custom_quotes/"
-msgstr "Nenhum ficheiro .lua encontrado em custom_quotes/"
+msgid "No .lua files found in sui_quotes/"
+msgstr "Nenhum ficheiro .lua encontrado em sui_quotes/"
 
 #: sui_updater.lua:419
 msgid ""
@@ -1121,8 +1121,8 @@ msgid "Physical books read this year:"
 msgstr "Livros físicos lidos este ano:"
 
 #: desktop_modules/module_quote.lua:1300
-msgid "Place .lua files in the plugin's desktop_modules/custom_quotes/ folder"
-msgstr "Coloque ficheiros .lua na pasta desktop_modules/custom_quotes/ do plugin"
+msgid "Place .lua files in the plugin's sui_quotes/ folder"
+msgstr "Coloque ficheiros .lua na pasta sui_quotes/ do plugin"
 
 #: sui_menu.lua:2183
 msgid "Placeholder cover for bookless folders"
@@ -2279,8 +2279,8 @@ msgid "New collection name"
 msgstr "Nome da nova coleção"
 
 #: desktop_modules/module_quote.lua:831
-msgid "No custom quotes found. Add a .lua file to the plugin\'s desktop_modules/custom_quotes/ folder and select it in Settings."
-msgstr "Nenhuma citação personalizada encontrada. Adicione um ficheiro .lua à pasta desktop_modules/custom_quotes/ do plugin e selecione-o nas Definições."
+msgid "No custom quotes found. Add a .lua file to the plugin's sui_quotes/ folder and select it in Settings."
+msgstr "Nenhuma citação personalizada encontrada. Adicione um ficheiro .lua à pasta sui_quotes/ do plugin e selecione-o nas Definições."
 
 #: sui_updater.lua:480
 msgid "No download file found.\n\nOpen the releases page?"
@@ -2892,3 +2892,9 @@ msgstr "Escala para os emblemas da biblioteca (progresso, páginas, etc.).\n100%
 
 msgid " p."
 msgstr " pág."
+
+msgid "Frame"
+msgstr "Moldura"
+
+msgid "Solid Background"
+msgstr "Fundo Sólido"

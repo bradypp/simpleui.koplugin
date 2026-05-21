@@ -1968,12 +1968,8 @@ function M.patchMenuInitForPagination(plugin)
         -- return_button and page_return_arrow (and owns back-navigation via
         -- sub_back_btn), that concern no longer applies.
         --
-        -- When navpager is active:  strip the page_info bar from collections too,
-        -- so the behaviour matches FM / History (navpager owns pagination).
-        -- When navpager is inactive: keep the original exclusion so collections
-        -- retain their native pagination bar (sub_back is not a pager in that case).
-        local is_coll = menu_self.name == "collections" or menu_self.name == "coll_list"
-        if is_coll and not Config.isNavpagerEnabled() then return end
+        -- The user has explicitly asked to hide the pagination bar (general setting),
+        -- so honour that for collections / coll_list just like History and FM.
 
         -- Remove all children except content_group to strip the pagination row
         -- (page_info, return_button, etc.).
@@ -2062,9 +2058,13 @@ function M.patchMenuForNavpager(plugin)
         tb:setSubTitle(table.concat(parts, "  ·  "), true)
     end
 
-    local function _setPageSubtitle(tb, page, page_num)
+    -- menu_self is optional; when provided and the widget is an injected overlay
+    -- (history, collections, …) the FM path prefix is suppressed so it does not
+    -- bleed into a foreign title bar.
+    local function _setPageSubtitle(tb, page, page_num, menu_self)
         if not tb or not tb.subtitle_widget then return end
-        _setSubtitleUnified(tb, _fm_path_base, page, page_num)
+        local path_base = (menu_self and menu_self._navbar_injected) and "" or _fm_path_base
+        _setSubtitleUnified(tb, path_base, page, page_num)
     end
     M._setPageSubtitle = _setPageSubtitle
 
@@ -2107,7 +2107,9 @@ function M.patchMenuForNavpager(plugin)
         local captured_page_num = menu_self.page_num or 0
 
         -- Update the subtitle synchronously.
-        _setPageSubtitle(menu_self.title_bar, captured_page, captured_page_num)
+        -- Pass menu_self so injected overlays (history, collections) do not
+        -- inherit the FM's current path in their subtitle.
+        _setPageSubtitle(menu_self.title_bar, captured_page, captured_page_num, menu_self)
 
         -- Navpager arrow update: coalesce multiple calls within the same tick,
         -- but read page/page_num from menu_self at execution time (not from the
