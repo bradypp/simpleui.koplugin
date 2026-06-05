@@ -21,6 +21,7 @@ local Screen          = Device.screen
 local lfs             = require("libs/libkoreader-lfs")
 local util            = require("util")
 local Config          = require("sui_config")
+local SUIStyle        = require("sui_style")
 
 local math_floor = math.floor
 local math_max   = math.max
@@ -150,8 +151,6 @@ end
 
 local _CLR_COVER_BORDER = Blitbuffer.COLOR_BLACK
 local _CLR_COVER_BG     = Blitbuffer.gray(0.88)
-local _CLR_BAR_BG       = Blitbuffer.gray(0.15)
-local _CLR_BAR_FG       = Blitbuffer.gray(0.75)
 
 -- ---------------------------------------------------------------------------
 -- vspan pool helper
@@ -179,22 +178,6 @@ function SH.pctStr(pct)
 end
 
 -- ---------------------------------------------------------------------------
--- progressBar
--- ---------------------------------------------------------------------------
-function SH.progressBar(w, pct, bh)
-    bh = bh or Screen:scaleBySize(4)
-    local fw = math_max(0, math_floor(w * math_min(pct or 0, 1.0)))
-    if fw <= 0 then
-        return LineWidget:new{ dimen = Geom:new{ w = w, h = bh }, background = _CLR_BAR_BG }
-    end
-    return OverlapGroup:new{
-        dimen = Geom:new{ w = w, h = bh },
-        LineWidget:new{ dimen = Geom:new{ w = w,  h = bh }, background = _CLR_BAR_BG },
-        LineWidget:new{ dimen = Geom:new{ w = fw, h = bh }, background = _CLR_BAR_FG },
-    }
-end
-
--- ---------------------------------------------------------------------------
 -- coverPlaceholder
 -- ---------------------------------------------------------------------------
 -- Renders a FakeCover-style placeholder (mirroring KOReader's coverbrowser
@@ -214,7 +197,7 @@ function SH.coverPlaceholder(title, authors, w, h)
     w = tonumber(w) or 100
     h = tonumber(h) or 150
 
-    local border = Size.border.thin
+    local border = SUIStyle.BADGE_BORDER_SZ
     -- Inner dimensions (FakeCover uses width/height = outer - 2*bordersize,
     -- since margin=0 and padding=0)
     local width  = w - 2 * border
@@ -259,8 +242,8 @@ function SH.coverPlaceholder(title, authors, w, h)
     -- reduced font size so text fits comfortably without many loop iterations.
     local initial_sizedec = Screen:scaleBySize(4)
     local sizedec_step    = Screen:scaleBySize(2)
-    local authors_font_max, authors_font_min = 20, 6
-    local title_font_max,   title_font_min   = 24, 10
+    local authors_font_max, authors_font_min = SUIStyle.FS_SUBTITLE, 6   -- 20 / 6
+    local title_font_max,   title_font_min   = SUIStyle.FS_TITLE + 2, 10 -- 24 / 10 (slightly above FS_TITLE for cover prominence)
     local top_pad    = Size.padding.default
     local bottom_pad = Size.padding.default
 
@@ -277,7 +260,7 @@ function SH.coverPlaceholder(title, authors, w, h)
         if authors then
             authors_wg = TextBoxWidget:new{
                 text      = authors,
-                face      = Font:getFace("cfont", math_max(authors_font_max - sizedec, authors_font_min)),
+                face      = Font:getFace(SUIStyle.FACE_REGULAR, math_max(authors_font_max - sizedec, authors_font_min)),
                 width     = text_width,
                 alignment = "center",
                 bgcolor   = nil,
@@ -288,7 +271,7 @@ function SH.coverPlaceholder(title, authors, w, h)
         if title then
             title_wg = TextBoxWidget:new{
                 text      = title,
-                face      = Font:getFace("cfont", math_max(title_font_max - sizedec, title_font_min)),
+                face      = Font:getFace(SUIStyle.FACE_REGULAR, math_max(title_font_max - sizedec, title_font_min)),
                 width     = text_width,
                 alignment = "center",
                 bgcolor   = nil,
@@ -372,7 +355,7 @@ function SH.getBookCover(filepath, w, h, align, stretch_limit)
     if not (ok and img) then return nil end
     -- padding=0 + bordersize=1: the FrameContainer outer size is inner_w+2 × inner_h+2 = w×h.
     return FrameContainer:new{
-        bordersize = 1, color = _CLR_COVER_BORDER,
+        bordersize = SUIStyle.BADGE_BORDER_SZ, color = _CLR_COVER_BORDER,
         padding    = 0, margin = 0,
         dimen      = Geom:new{ w = w, h = h },
         img,

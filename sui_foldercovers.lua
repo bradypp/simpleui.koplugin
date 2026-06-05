@@ -9,6 +9,7 @@ local _           = require("sui_i18n").translate
 local lfs         = require("libs/libkoreader-lfs")
 local logger      = require("logger")
 local SUISettings = require("sui_store")
+local SUIStyle    = require("sui_style")
 
 -- Cached at module level so require() hits the cache on every cell render.
 local AlphaContainer  = require("ui/widget/container/alphacontainer")
@@ -66,6 +67,7 @@ local SK = {
     badge_color_series   = "simpleui_fc_badge_color_series",
     badge_color_progress = "simpleui_fc_badge_color_progress",
     badge_color_new      = "simpleui_fc_badge_color_new",
+    new_mode             = "simpleui_fc_new_mode",
     badge_color_folder   = "simpleui_fc_badge_color_folder",
     badge_scale          = "simpleui_fc_badge_scale",
 }
@@ -139,8 +141,23 @@ function M.setProgressMode(v)
 end
 
 -- "New" badge for unread books (percent_finished nil, status not complete/abandoned).
-function M.getOverlayNew()  return SUISettings:nilOrTrue(SK.overlay_new) end
-function M.setOverlayNew(v) _setFlag(SK.overlay_new, v)                  end
+-- Mode: "badge" (rounded rectangle, default), "ribbon" (diagonal corner ribbon), "none".
+-- For backwards-compatibility the legacy bool SK.overlay_new is preserved as the source
+-- of truth for "enabled/disabled"; SK.new_mode stores the style when enabled.
+function M.getNewMode()
+    local stored = SUISettings:readSetting(SK.new_mode)
+    if stored == "ribbon" or stored == "badge" or stored == "none" then return stored end
+    -- Migrate from legacy bool: if the old key was explicitly false → "none".
+    if SUISettings:readSetting(SK.overlay_new) == false then return "none" end
+    return "ribbon"
+end
+function M.setNewMode(v)
+    SUISettings:saveSetting(SK.new_mode, v)
+    _setFlag(SK.overlay_new, v ~= "none")
+end
+-- Kept for external callers (module_new_books etc.) that only need on/off.
+function M.getOverlayNew()  return M.getNewMode() ~= "none" end
+function M.setOverlayNew(v) M.setNewMode(v and "badge" or "none") end
 
 -- Virtual series folders in the mosaic.
 function M.getSeriesGrouping()  return SUISettings:isTrue(SK.series_grouping) end
@@ -263,8 +280,8 @@ end
 -- Base sizes computed once from device DPI at startup.
 local _BASE_COVER_H = math.floor(Screen:scaleBySize(96))
 local _BASE_NB_SIZE = Screen:scaleBySize(10)
-local _BASE_NB_FS   = Screen:scaleBySize(4)
-local _BASE_DIR_FS  = Screen:scaleBySize(5)
+local _BASE_NB_FS   = SUIStyle.FS_DETAIL  -- 15: folder-count number badge overlay
+local _BASE_DIR_FS  = SUIStyle.FS_SUBTITLE -- 20: directory name label ceiling for binary-search
 
 local _EDGE_THICK  = math.max(1, Screen:scaleBySize(3))
 local _EDGE_MARGIN = math.max(1, Screen:scaleBySize(1))
@@ -361,6 +378,10 @@ end
 -- evicted automatically when anything that affects the list changes.
 -- Disabled for access-time collate (directory mtime never reflects reads).
 local _itc = nil
+
+-- Blitbuffer cache for pre-rendered diagonal ribbon banners (keyed by
+-- dimensions + label + colors). Flushed in M.invalidateCache().
+local _ribbon_bb_cache = {}
 local _orig_setBookInfoCacheProperty = nil
 local _orig_genItemTableFromPath     = nil
 
@@ -442,7 +463,14 @@ local function _uninstallItemCache()
     _itc = nil
 end
 
-function M.invalidateCache() _itc = nil end
+function M.invalidateCache()
+    _itc = nil
+    -- Also flush the ribbon Blitbuffer cache so a color/size change takes effect.
+    for k, buf in pairs(_ribbon_bb_cache) do
+        if buf and buf.free then buf:free() end
+        _ribbon_bb_cache[k] = nil
+    end
+end
 
 -- ---------------------------------------------------------------------------
 -- 6. Cover discovery
@@ -1397,8 +1425,8 @@ local function _buildProgressBadgeDesc(eff_size, status, percent_finished, borde
     if status == "abandoned" then
         local font_sz = math.max(7, math.floor(eff_size * 0.26))
         text_widget = TextWidget:new{
-            text    = "",
-            face    = Font:getFace("cfont", font_sz),
+            text    = "\u{EAE3}",
+            face    = Font:getFace(SUIStyle.FACE_ICONS, font_sz),
             bold    = false,
             fgcolor = text_color,
             padding = 0,
@@ -1408,7 +1436,7 @@ local function _buildProgressBadgeDesc(eff_size, status, percent_finished, borde
         local font_sz = math.max(7, math.floor(eff_size * 0.26))
         text_widget = TextWidget:new{
             text    = pct .. "%",
-            face    = Font:getFace("cfont", font_sz),
+            face    = Font:getFace(SUIStyle.FACE_REGULAR, font_sz),
             bold    = true,
             fgcolor = text_color,
             padding = 0,
@@ -1418,7 +1446,7 @@ local function _buildProgressBadgeDesc(eff_size, status, percent_finished, borde
     return {
         bw               = bw,
         bh               = bh,
-        border           = border or 1,
+        border           = border or SUIStyle.BADGE_BORDER_SZ,
         status           = status,
         percent_finished = percent_finished,
         eff_size         = eff_size,
@@ -1434,8 +1462,9 @@ local function _drawProgressBadge(bb, ox, oy, desc)
     local fr         = desc.border
     local fill_color = desc.dark and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_WHITE
     local text_color = desc.dark and Blitbuffer.COLOR_WHITE or Blitbuffer.COLOR_BLACK
+    local brd_color  = SUIStyle.BADGE_BORDER_CLR
 
-    _pentagonPaintRect(bb, ox,      oy,      bw + 2 * fr, bh + 2 * fr, Blitbuffer.COLOR_GRAY)
+    _pentagonPaintRect(bb, ox,      oy,      bw + 2 * fr, bh + 2 * fr, brd_color)
     _pentagonPaintRect(bb, ox + fr, oy + fr, bw,          bh,          fill_color)
 
     local rect_h     = math.floor(bh * 30 / 42)
@@ -1471,6 +1500,98 @@ local function _drawProgressBadge(bb, ox, oy, desc)
     -- "not started": bare pentagon, no content drawn.
 end
 
+-- ── Corner ribbon ("New" style) ───────────────────────────────────────────
+-- Paints a diagonal band across the top-right corner of the cover Blitbuffer
+-- at 45°, with the label text rotated inside it.
+--
+-- Strategy: build a temp Blitbuffer (tw × band_thick) in axis-aligned space,
+-- render border + fill + text into it once, then use a destination-driven
+-- inverse-map loop to blit each screen pixel from the rotated source.
+-- The result is cached by (dimensions, label, colors) so the per-pixel loop
+-- only runs once per unique configuration, not once per cover.
+
+local function _paintCornerRibbon(bb, cover_left, cover_right, cover_top, cover_h,
+                                  span, band_thick, label, font_sz, dark)
+    local C = 0.70711  -- cos 45° = sin 45°
+
+    -- Buffer width: (span + 2*band) * √2 so the ribbon ends protrude past both
+    -- cover edges; the cover-bounds clipping hides the end-cuts cleanly.
+    local tw = math.ceil((span + band_thick * 2) * 1.41422)
+    local th = band_thick
+    if tw <= 0 or th <= 0 then return end
+
+    local bg  = dark and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_WHITE
+    local fg  = dark and Blitbuffer.COLOR_WHITE or Blitbuffer.COLOR_BLACK
+    local brd = SUIStyle.BADGE_BORDER_CLR
+
+    local cache_key = string.format("%d|%d|%d|%s|%d|%d|%s|%s",
+        tw, th, bb:getType(), label, font_sz, dark and 1 or 0, tostring(SUIStyle.BADGE_BORDER_SZ), tostring(brd))
+    local tmp = _ribbon_bb_cache[cache_key]
+
+    if not tmp then
+        tmp = Blitbuffer.new(tw, th, bb:getType())
+        if not tmp then return end
+
+        -- 1-px border on long edges, bg interior.
+        local bw = SUIStyle.BADGE_BORDER_SZ
+        tmp:paintRect(0, 0, tw, th, brd)
+        if bw * 2 < th then
+            tmp:paintRect(0, bw, tw, th - bw * 2, bg)
+        end
+
+        -- Render label; step font down 1pt at a time until it fits, min 6pt.
+        local inner_h = math.max(1, th - bw * 2)
+        local max_w   = math.floor(tw * 0.82)
+        local lbl, lsz
+        local fs = font_sz
+        repeat
+            if lbl and lbl.free then lbl:free() end
+            lbl = TextWidget:new{
+                text    = label,
+                face    = Font:getFace(SUIStyle.FACE_REGULAR, fs),
+                bold    = true,
+                fgcolor = fg,
+                padding = 0,
+            }
+            lsz = lbl:getSize()
+            if lsz.w <= max_w and lsz.h <= inner_h then break end
+            fs = fs - 1
+        until fs < 6
+        local lx = math.max(0, math.floor((tw - lsz.w) / 2))
+        local ly = math.max(0, math.floor((th - lsz.h) / 2))
+        lbl:paintTo(tmp, lx, ly)
+        if lbl.free then lbl:free() end
+
+        _ribbon_bb_cache[cache_key] = tmp
+    end
+
+    -- Destination-driven inverse-map: for each screen pixel in the ribbon's
+    -- bounding box, reverse-rotate 45° to find the source pixel in tmp.
+    local cx       = cover_right - math.floor(span / 2)
+    local cy       = cover_top   + math.floor(span / 2)
+    local half_box = math.ceil((tw + th) * C / 2) + 1
+    local bb_w     = bb:getWidth()
+    local bb_h     = bb:getHeight()
+    local tw_half  = tw / 2
+    local th_half  = th / 2
+    for dy = cy - half_box, cy + half_box do
+        if dy >= cover_top and dy < cover_top + cover_h and dy >= 0 and dy < bb_h then
+            local dy_rel = dy - cy
+            for dx = cx - half_box, cx + half_box do
+                if dx >= cover_left and dx < cover_right and dx >= 0 and dx < bb_w then
+                    local dx_rel = dx - cx
+                    -- Inverse of +45° rotation (top-right "\" band).
+                    local sx = math.floor(tw_half + (dx_rel + dy_rel) * C)
+                    local sy = math.floor(th_half + (dy_rel - dx_rel) * C)
+                    if sx >= 0 and sx < tw and sy >= 0 and sy < th then
+                        bb:setPixel(dx, dy, tmp:getPixel(sx, sy))
+                    end
+                end
+            end
+        end
+    end
+end
+
 -- ── Rounded-rectangle badge (pages, series index, "New") ─────────────────────
 
 local function _buildRectBadgeWidget(text, bold, cell_min, dark, new_badge, badge_scale)
@@ -1480,14 +1601,15 @@ local function _buildRectBadgeWidget(text, bold, cell_min, dark, new_badge, badg
     local pad_h    = math.max(1, math.floor(eff_size * 0.10))
     local pad_v    = math.max(1, math.floor(eff_size * 0.06))
     local corner   = math.max(1, math.floor(eff_size * 0.08))
-    local border   = Size.border.thin
+    local border   = SUIStyle.BADGE_BORDER_SZ
 
     local bg = dark and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_WHITE
     local fg = dark and Blitbuffer.COLOR_WHITE or Blitbuffer.COLOR_BLACK
+    local border_color = SUIStyle.BADGE_BORDER_CLR
 
     local tw = TextWidget:new{
         text    = text,
-        face    = Font:getFace("cfont", font_sz),
+        face    = Font:getFace(SUIStyle.FACE_REGULAR, font_sz),
         bold    = bold or false,
         fgcolor = fg,
         padding = 0,
@@ -1504,7 +1626,7 @@ local function _buildRectBadgeWidget(text, bold, cell_min, dark, new_badge, badg
     return FrameContainer:new{
         dimen      = Geom:new{ w = w, h = h },
         bordersize = border,
-        color      = Blitbuffer.COLOR_GRAY,
+        color      = border_color,
         background = bg,
         radius     = corner,
         padding    = 0,
@@ -1551,7 +1673,7 @@ local function _buildLabel(item, available_w, size, border, cv_scale, display, s
     local label_style = display.label_style
     local label_pos   = display.label_pos
 
-    local dir_max_fs = math.max(8, math.floor(_BASE_DIR_FS * cv_scale * M.getLabelScale()))
+    local dir_max_fs = math.max(8, math.floor(_BASE_DIR_FS * M.getLabelScale()))
     local directory  = item:_getFolderNameWidget(available_w, dir_max_fs)
     local img_only   = Geom:new{ w = size.w, h = size.h }
     local img_dimen  = Geom:new{ w = size.w + border * 2, h = size.h + border * 2 }
@@ -1608,20 +1730,21 @@ local function _buildBadge(mandatory, cover_dimen, cv_scale, cell_dimen)
     local dark           = M.getBadgeColorFolder() == "dark"
     local bg_color       = dark and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_WHITE
     local fg_color       = dark and Blitbuffer.COLOR_WHITE or Blitbuffer.COLOR_BLACK
+    local border_color   = SUIStyle.BADGE_BORDER_CLR
 
     local badge = FrameContainer:new{
         padding    = 0,
-        bordersize = Size.border.thin,
-        color      = Blitbuffer.COLOR_GRAY,
+        bordersize = SUIStyle.BADGE_BORDER_SZ,
+        color      = border_color,
         background = bg_color,
         radius     = math.floor(nb_size / 2),
         dimen      = Geom:new{ w = nb_size, h = nb_size },
         CenterContainer:new{
-            dimen = Geom:new{ w = nb_size, h = nb_size },
+            dimen = Geom:new{ w = nb_size - 2 * SUIStyle.BADGE_BORDER_SZ, h = nb_size - 2 * SUIStyle.BADGE_BORDER_SZ },
             (function()
                 local tw = TextWidget:new{
                     text    = tostring(math.min(nb_count, 99)),
-                    face    = Font:getFace("cfont", nb_font_size),
+                    face    = Font:getFace(SUIStyle.FACE_REGULAR, nb_font_size),
                     fgcolor = fg_color,
                     bold    = true,
                 }
@@ -1667,7 +1790,7 @@ end
 -- self.height is already reduced by _STRIP_H in the update() wrapper before
 -- this is called, so _module_strip_h must NOT be subtracted again here.
 local function _computeCellGeometry(item)
-    local border  = Size.border.thin
+    local border  = SUIStyle.BADGE_BORDER_SZ
     local spine_w = not M.getHideSpine() and _SPINE_W or 0
     local max_img_w = item.width  - spine_w - border * 2
     local max_img_h = item.height - border * 2
@@ -1831,14 +1954,14 @@ local function _installStripPatch(MosaicMenuItem, BookInfoManager, _STRIP_H,
         local Screen_s      = require("device").screen
         local UI_core       = require("sui_core")
 
-        local TITLE_FONT_S  = 16
-        local AUTHOR_FONT_S = 13
+        local TITLE_FONT_S  = SUIStyle.FS_DETAIL    -- 15: cover title in size-probe context
+        local AUTHOR_FONT_S = SUIStyle.FS_CAPTION   -- 12: cover author in size-probe context
         local PAD_S         = Screen_s:scaleBySize(3)
         local GAP_S         = Screen_s:scaleBySize(2)
         local PAD_H_S       = Screen_s:scaleBySize(6)
 
         local function _mhs(fs, bold)
-            local tw = TextWidget_s:new{ text="Ag", face=Font_s:getFace("cfont",fs),
+            local tw = TextWidget_s:new{ text="Ag", face=Font_s:getFace(SUIStyle.FACE_REGULAR,fs),
                 bold=bold, padding=0 }
             local h = tw:getSize().h; tw:free(); return h
         end
@@ -1872,7 +1995,7 @@ local function _installStripPatch(MosaicMenuItem, BookInfoManager, _STRIP_H,
                     strip_bb:fill(Blitbuffer_s.COLOR_WHITE)
                     local tw = TextWidget_s:new{
                         text                   = BD_s.auto(name),
-                        face                   = Font_s:getFace("cfont", TITLE_FONT_S),
+                        face                   = Font_s:getFace(SUIStyle.FACE_REGULAR, TITLE_FONT_S),
                         bold                   = true,
                         padding                = 0,
                         fgcolor                = Blitbuffer_s.COLOR_BLACK,
@@ -1934,7 +2057,7 @@ local function _installStripPatch(MosaicMenuItem, BookInfoManager, _STRIP_H,
                     if _show_title_strip and self._simpleui_strip_data.title then
                         local tw = TextWidget_s:new{
                             text                   = BD_s.auto(self._simpleui_strip_data.title),
-                            face                   = Font_s:getFace("cfont", TITLE_FONT_S),
+                            face                   = Font_s:getFace(SUIStyle.FACE_REGULAR, TITLE_FONT_S),
                             bold                   = true,
                             padding                = 0,
                             fgcolor                = Blitbuffer_s.COLOR_BLACK,
@@ -1950,7 +2073,7 @@ local function _installStripPatch(MosaicMenuItem, BookInfoManager, _STRIP_H,
                     if _show_author_strip and self._simpleui_strip_data.authors then
                         local aw = TextWidget_s:new{
                             text                   = BD_s.auto(self._simpleui_strip_data.authors),
-                            face                   = Font_s:getFace("cfont", AUTHOR_FONT_S),
+                            face                   = Font_s:getFace(SUIStyle.FACE_REGULAR, AUTHOR_FONT_S),
                             bold                   = false,
                             padding                = 0,
                             fgcolor                = Blitbuffer_s.COLOR_BLACK,
@@ -2069,12 +2192,12 @@ function M.install()
         local _PAD = Screen_:scaleBySize(3)
         local _GAP = Screen_:scaleBySize(2)
         local function _mh(fs, bold)
-            local tw = TextWidget_:new{ text="Ag", face=Font_:getFace("cfont",fs),
+            local tw = TextWidget_:new{ text="Ag", face=Font_:getFace(SUIStyle.FACE_REGULAR,fs),
                 bold=bold, padding=0 }
             local h = tw:getSize().h; tw:free(); return h
         end
-        local TITLE_LINE  = _mh(16, true)
-        local AUTHOR_LINE = _mh(13, false)
+        local TITLE_LINE  = _mh(SUIStyle.FS_DETAIL, true)
+        local AUTHOR_LINE = _mh(SUIStyle.FS_CAPTION, false)
         _STRIP_H = _PAD
         if _show_title_strip  then _STRIP_H = _STRIP_H + TITLE_LINE end
         if _show_title_strip and _show_author_strip then _STRIP_H = _STRIP_H + _GAP end
@@ -2212,7 +2335,7 @@ function M.install()
             self._fc_overlay_pages    = M.getOverlayPages()
             self._fc_overlay_series   = M.getOverlaySeries()
             self._fc_overlay_progress = M.getProgressMode() == "banner"
-            self._fc_overlay_new      = M.getOverlayNew()
+            -- _fc_overlay_new is set per-book below by the new-mode block.
 
             if self._fc_progress_bb and self._fc_progress_bb.text_widget then
                 self._fc_progress_bb.text_widget:free()
@@ -2244,7 +2367,10 @@ function M.install()
 
             -- Progress pentagon: only for books that have been opened.
             if self._fc_overlay_progress then
-                local has_progress = (self.percent_finished ~= nil and self.percent_finished >= 0.01)
+                -- ZenUI criteria: show progress badge whenever percent_finished is
+                -- non-nil (even 0%), or status is complete/abandoned.
+                -- This correctly handles books opened but not yet advanced past page 1.
+                local has_progress = (self.percent_finished ~= nil)
                     or (self.status == "complete") or (self.status == "abandoned")
                 if has_progress then
                 local eff_size = math.max(8, math.floor(
@@ -2252,21 +2378,33 @@ function M.install()
                     local dark = M.getBadgeColorProgress() == "dark"
                     local prog_desc = _buildProgressBadgeDesc(
                         eff_size, self.status, self.percent_finished,
-                        Size.border.thin, dark)
+                        SUIStyle.BADGE_BORDER_SZ, dark)
                     if prog_desc then self._fc_progress_bb = prog_desc end
                 end
             end
 
-            -- "New" badge: unread books (progress < 1%).
-            if self._fc_overlay_new then
-                local is_unread = ((self.percent_finished or 0) < 0.01)
+            -- "New" badge: unread books (percent_finished nil).
+            -- The mode is read once per update and stored on the item so paintTo
+            -- doesn't need to call M.getNewMode() on every frame.
+            local _new_mode = M.getNewMode()
+            self._fc_new_mode = _new_mode
+            if _new_mode ~= "none" then
+                local is_unread = (self.percent_finished == nil)
                     and (self.status ~= "complete") and (self.status ~= "abandoned")
                 if is_unread then
-                    local cell_min = math.min(self.width or 40, self.height or 40)
-                    local dark = M.getBadgeColorNew() == "dark"
-                    self._fc_new_widget =
-                        _buildRectBadgeWidget(_("New"), true, cell_min, dark, true, badge_scale)
+                    if _new_mode == "badge" then
+                        local cell_min = math.min(self.width or 40, self.height or 40)
+                        local dark = M.getBadgeColorNew() == "dark"
+                        self._fc_new_widget =
+                            _buildRectBadgeWidget(_("New"), true, cell_min, dark, true, badge_scale)
+                    end
+                    -- ribbon mode: no widget pre-built; painted directly in paintTo.
+                    self._fc_overlay_new = true
+                else
+                    self._fc_overlay_new = false
                 end
+            else
+                self._fc_overlay_new = false
             end
         end
 
@@ -2562,7 +2700,7 @@ function M.install()
                     dimen = Geom:new{ w = img_w, h = img_h },
                     TextWidget:new{
                         text    = nerd_char,
-                        face    = Font:getFace("symbols", math.floor(icon_size * 0.85)),
+                        face    = Font:getFace(SUIStyle.FACE_ICONS, math.floor(icon_size * 0.85)),
                         fgcolor = Blitbuffer.COLOR_BLACK,
                         padding = 0,
                     },
@@ -2619,7 +2757,7 @@ function M.install()
         if cached_fs then
             return TextBoxWidget:new{
                 text      = text,
-                face      = Font:getFace("cfont", cached_fs),
+                face      = Font:getFace(SUIStyle.FACE_REGULAR, cached_fs),
                 width     = available_w,
                 alignment = "center",
                 bold      = true,
@@ -2635,12 +2773,12 @@ function M.install()
         local dir_font_size = max_fs
 
         if longest_word ~= "" then
-            local lo, hi = 8, dir_font_size
+        local lo, hi = 10, dir_font_size
             while lo < hi do
                 local mid = math.floor((lo + hi + 1) / 2)
                 local tw = TextWidget:new{
                     text = longest_word,
-                    face = Font:getFace("cfont", mid),
+                    face = Font:getFace(SUIStyle.FACE_REGULAR, mid),
                     bold = true,
                 }
                 local word_w = tw:getWidth()
@@ -2652,14 +2790,14 @@ function M.install()
 
         -- Pass 2: binary-search largest font where the full text fits in two lines.
         -- Pass 1 narrows the range, minimising TextBoxWidget allocations.
-        local lo, hi = 8, dir_font_size
+    local lo, hi = 10, dir_font_size
         while lo < hi do
             local mid  = math.floor((lo + hi + 1) / 2)
             local fits = false
             local ok, tbw = pcall(function()
                 return TextBoxWidget:new{
                     text      = text,
-                    face      = Font:getFace("cfont", mid),
+                    face      = Font:getFace(SUIStyle.FACE_REGULAR, mid),
                     width     = available_w,
                     alignment = "center",
                     bold      = true,
@@ -2677,7 +2815,7 @@ function M.install()
 
         return TextBoxWidget:new{
             text      = text,
-            face      = Font:getFace("cfont", dir_font_size),
+            face      = Font:getFace(SUIStyle.FACE_REGULAR, dir_font_size),
             width     = available_w,
             alignment = "center",
             bold      = true,
@@ -2867,19 +3005,54 @@ function M.install()
             end
         end
 
-        -- "New" badge (top-right).
+        -- "New" badge / ribbon (top-right).
         -- Not shown when the progress pentagon is active for this item.
         if self._fc_overlay_new then
-            local wg = self._fc_new_widget
             local has_progress_badge = self._fc_overlay_progress and self._fc_progress_bb
-            if wg and not has_progress_badge then
-                local badge_x
-                if BD.mirroredUILayout() then
-                    badge_x = fx + _BADGE_RIGHT_INSET
-                else
-                    badge_x = fx + fw - wg.dimen.w - _BADGE_RIGHT_INSET
+            if not has_progress_badge then
+                local mode = self._fc_new_mode or "badge"
+                local dark = M.getBadgeColorNew() == "dark"
+
+                if mode == "badge" then
+                    -- Rounded-rectangle widget, pre-built in update().
+                    local wg = self._fc_new_widget
+                    if wg then
+                        local badge_x
+                        if BD.mirroredUILayout() then
+                            badge_x = fx + _BADGE_RIGHT_INSET
+                        else
+                            badge_x = fx + fw - wg.dimen.w - _BADGE_RIGHT_INSET
+                        end
+                        wg:paintTo(bb, badge_x, fy + _BADGE_RIGHT_INSET)
+                    end
+
+                elseif mode == "ribbon" then
+                    -- Diagonal corner ribbon, painted directly onto bb.
+                    local badge_scale = M.getBadgeScale()
+                    local cell_min   = math.min(fw, fh)
+                    local eff_size   = math.max(8, math.floor(cell_min * 0.1694 * badge_scale))
+                    local span       = math.floor(eff_size * 2.5)
+                    local band_thick = math.floor(span * 0.40)
+                    local font_sz    = math.max(7, math.floor(eff_size * 0.26))
+                    local cover_left, cover_right
+                    if BD.mirroredUILayout() then
+                        cover_left  = fx
+                        cover_right = fx + fw
+                    else
+                        cover_left  = fx
+                        cover_right = fx + fw
+                    end
+                    _paintCornerRibbon(bb,
+                        cover_left, cover_right, fy, fh,
+                        span, band_thick, _("New"), font_sz, dark)
+                    -- Repaint cover border over ribbon so it isn't obscured.
+                local brd = SUIStyle.BADGE_BORDER_SZ
+                    if brd > 0 then
+                        local bclr = Blitbuffer.COLOR_BLACK
+                        bb:paintRect(cover_left,  fy, fw,  brd,  bclr)  -- top edge
+                        bb:paintRect(cover_right - brd, fy, brd, fh, bclr)  -- right edge
+                    end
                 end
-                wg:paintTo(bb, badge_x, fy + _BADGE_RIGHT_INSET)
             end
         end
 
@@ -3086,7 +3259,7 @@ function M.install()
                 h = self.height - 2 * underline_h,
             }
 
-            local border_size = Size.border.thin
+        local border_size = SUIStyle.BADGE_BORDER_SZ
             local img_size    = dimen.h
             local max_img_w   = img_size - 2 * border_size
 
@@ -3118,7 +3291,7 @@ function M.install()
 
             local wname = TextBoxWidget:new{
                 text                          = BD.directory(self.text),
-                face                          = Font:getFace("cfont", font_size),
+                face                          = Font:getFace(SUIStyle.FACE_REGULAR, font_size),
                 width                         = main_w,
                 alignment                     = "left",
                 bold                          = true,
@@ -3128,7 +3301,7 @@ function M.install()
             }
             local wcount = TextWidget:new{
                 text = self.mandatory or "",
-                face = Font:getFace("infont", info_size),
+                face = Font:getFace(SUIStyle.FACE_MONO, info_size),
             }
 
             local wmain = LeftContainer:new{

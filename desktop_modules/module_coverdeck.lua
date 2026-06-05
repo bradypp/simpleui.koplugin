@@ -18,7 +18,8 @@ local logger         = require("logger")
 
 local Config       = require("sui_config")
 local UI           = require("sui_core")
-local SUISettings = require("sui_store")
+local SUISettings  = require("sui_store")
+local SUIStyle     = require("sui_style")
 local PAD          = UI.PAD
 local PAD2         = UI.PAD2
 local CLR_TEXT_SUB = UI.CLR_TEXT_SUB
@@ -66,10 +67,10 @@ end
 -- Settings keys
 -- ---------------------------------------------------------------------------
 
-local SETTING_SOURCE        = "flow_recent_source"
-local SETTING_TITLE_POS     = "coverdeck_title_pos"
-local SETTING_SHOW_FINISHED = "coverdeck_show_finished"  -- pfx .. this; default OFF
-local ELEM_ORDER_KEY    = "flow_stats_order"
+local SETTING_SOURCE        = "coverdeck_source"         -- pfx .. this; "recent"|"tbr"
+local SETTING_TITLE_POS     = "coverdeck_title_pos"       -- pfx .. this; "above"|"below"
+local SETTING_SHOW_FINISHED = "coverdeck_show_finished"   -- pfx .. this; default OFF
+local ELEM_ORDER_KEY        = "coverdeck_stats_order"     -- pfx .. this
 
 local _ELEM_DEFAULT_ORDER = { "percent", "book_days", "book_time", "book_remaining" }
 local _ELEM_LABELS = {
@@ -96,11 +97,11 @@ local function showFinished(pfx)
 end
 
 local function _showElem(pfx, key)
-    return SUISettings:nilOrTrue(pfx .. "flow_show_" .. key)
+    return SUISettings:nilOrTrue(pfx .. "coverdeck_show_" .. key)
 end
 
 local function _toggleElem(pfx, key)
-    SUISettings:saveSetting(pfx .. "flow_show_" .. key, not _showElem(pfx, key))
+    SUISettings:saveSetting(pfx .. "coverdeck_show_" .. key, not _showElem(pfx, key))
 end
 
 local function _getElemOrder(pfx)
@@ -188,10 +189,10 @@ local function fmtTime(secs)
     else                     return string.format("%dm", m) end
 end
 
-local function fetchBookStats(md5, shared_conn, ctx)
+local function fetchBookStats(md5, shared_conn, ctx, force)
     if not md5 then return nil end
     local cached = _bstats_cache[md5]
-    if cached then
+    if not force and cached then
         cached.t = os.time()   -- update LRU access time
         return cached.result
     end
@@ -311,7 +312,7 @@ local M = {}
 M.id          = "coverdeck"
 M.name        = _("Cover Deck")
 M.label       = nil
-M.enabled_key = "coverdeck"
+M.enabled_key = "coverdeck_enabled"
 M.default_on  = false
 M.has_covers  = true   -- activates e-ink dithering and cover poll
 M.is_book_mod = true   -- suppresses empty-state when active
@@ -323,26 +324,21 @@ function M.reset()
 end
 
 function M.invalidateCache()
-    _bstats_cache       = {}
-    _bstats_cache_count = 0
+    -- Stale data is intentionally kept for the async UI update.
 end
 
 -- Removes only the cache entry for the given md5, leaving all other books
 -- intact.  Called from onCloseDocument so the centre cover's stats are
 -- refreshed after reading without discarding stats for every other book.
 function M.invalidateCacheForMd5(md5)
-    if not md5 then return end
-    if _bstats_cache[md5] then
-        _bstats_cache[md5] = nil
-        _bstats_cache_count = _bstats_cache_count - 1
-    end
+    -- Stale data is intentionally kept.
 end
 
 -- Exposed for pre-computation in _buildCtx (sui_homescreen.lua).
 -- Identical to the local fetchBookStats but callable from outside the module.
 -- Returns the stats table or nil; does NOT set ctx.db_conn_fatal (no ctx here).
-function M.fetchBookStatsForCtx(md5, db_conn)
-    return fetchBookStats(md5, db_conn, nil)
+function M.fetchBookStatsForCtx(md5, db_conn, force)
+    return fetchBookStats(md5, db_conn, nil, force)
 end
 
 -- ---------------------------------------------------------------------------
@@ -543,12 +539,12 @@ function M.build(w, ctx)
 
     -- Book data for centre cover
     local bd        = SH.getBookData(fps[curIdx], ctx.prefetched and ctx.prefetched[fps[curIdx]])
-    local title_fs  = math.floor(Screen:scaleBySize(12) * scale * lbl_scale)
-    local info_fs   = math.floor(Screen:scaleBySize(8)  * scale * lbl_scale)
-    local bar_h     = math.max(1, math.floor(Screen:scaleBySize(7) * scale))
+    local title_fs  = math.floor(SUIStyle.FS_TITLE  * scale * lbl_scale)
+    local info_fs   = math.floor(SUIStyle.FS_DETAIL * scale * lbl_scale)
+    local bar_h     = math.max(1, math.floor(Screen:scaleBySize(8) * scale))
     local title_pos = c and c.title_pos or getTitlePos(pfx)
-    local face_title = Font:getFace("smallinfofont", math.max(8, title_fs))
-    local face_info  = Font:getFace("smallinfofont", math.max(7, info_fs))
+    local face_title = Font:getFace(SUIStyle.FACE_REGULAR, math.max(8, title_fs))
+    local face_info  = Font:getFace(SUIStyle.FACE_REGULAR, math.max(7, info_fs))
 
     -- Title widget
     local title_widget
@@ -563,11 +559,23 @@ function M.build(w, ctx)
         }
     end
 
+    local _cd_update_funcs = {}
+    local function _updateColoredText(wgt, txt, fg)
+        if wgt._inner and wgt._inner.setText then
+            wgt._inner:setText(txt)
+            wgt._fg = fg
+            wgt.dimen = wgt._inner:getSize()
+        elseif wgt.setText then
+            wgt:setText(txt)
+            wgt.fgcolor = fg
+        end
+    end
+
     -- Meta block: progress bar + stats line
     local meta = VerticalGroup:new{ align = "center" }
 
     if show_progress then
-        meta[#meta+1] = SH.progressBar(center_w, bd.percent, bar_h)
+        meta[#meta+1] = UI.progressBar(center_w, bd.percent, bar_h)
     end
 
     -- Stats
@@ -598,40 +606,55 @@ function M.build(w, ctx)
         end
     end
 
-    local stats_parts = {}
+    local has_any_stats = false
     for _i, key in ipairs(stats_order) do
-        if _showElem(pfx, key) then
-            local text
-            if key == "percent" then
-                text = string.format(_("%d%% Read"), math.floor((bd.percent or 0) * 100 + 0.5))
-            elseif bstats then
-                if key == "book_days" and bstats.days and bstats.days > 0 then
-                    text = string.format(N_("%d day of reading", "%d days of reading", bstats.days), bstats.days)
-                elseif key == "book_time" and bstats.total_secs and bstats.total_secs > 0 then
-                    text = string.format(_("%s read"), fmtTime(bstats.total_secs))
-                elseif key == "book_remaining" then
-                    local avg_t = (bstats.avg_time and bstats.avg_time > 0) and bstats.avg_time or bd.avg_time
-                    if avg_t and avg_t > 0 and bd.pages and bd.pages > 0 then
-                        local secs_left = math.floor(avg_t * bd.pages * (1 - (bd.percent or 0)))
-                        if secs_left > 0 then
-                            text = string.format(_("%s remaining"), fmtTime(secs_left))
-                        end
-                    end
-                end
-            end
-            if text then stats_parts[#stats_parts+1] = text end
-        end
+        local show_this = (c and c.show) and c.show[key]
+        if show_this == nil then show_this = _showElem(pfx, key) end
+        if show_this then has_any_stats = true; break end
     end
 
-    if #stats_parts > 0 then
+    if has_any_stats then
         if #meta > 0 then meta[#meta+1] = SH.vspan(PAD2, ctx.vspan_pool) end
-        meta[#meta+1] = UI.makeColoredText{
-            text      = table.concat(stats_parts, " · "),
+        local stats_w = UI.makeColoredText{
+            text      = "",
             face      = face_info,
             fgcolor   = CLR_TEXT_SUB_EFF,
             width     = inner_w,
             alignment = "center",
         }
+        local function _update(nb, nd)
+            local stats_parts = {}
+            for _i, key in ipairs(stats_order) do
+                local show_this = (c and c.show) and c.show[key]
+                if show_this == nil then show_this = _showElem(pfx, key) end
+                if show_this then
+                    local text
+                    if key == "percent" then
+                        text = string.format(_("%d%% Read"), math.floor((nd.percent or 0) * 100 + 0.5))
+                    elseif nb then
+                        if key == "book_days" and nb.days and nb.days > 0 then
+                            text = string.format(N_("%d day of reading", "%d days of reading", nb.days), nb.days)
+                        elseif key == "book_time" and nb.total_secs and nb.total_secs > 0 then
+                            text = string.format(_("%s read"), fmtTime(nb.total_secs))
+                        elseif key == "book_remaining" then
+                            local avg_t = (nb.avg_time and nb.avg_time > 0) and nb.avg_time or nd.avg_time
+                            if avg_t and avg_t > 0 and nd.pages and nd.pages > 0 then
+                                local secs_left = math.floor(avg_t * nd.pages * (1 - (nd.percent or 0)))
+                                if secs_left > 0 then
+                                    text = string.format(_("%s remaining"), fmtTime(secs_left))
+                                end
+                            end
+                        end
+                    end
+                    if text then stats_parts[#stats_parts+1] = text end
+                end
+            end
+            local final_text = #stats_parts > 0 and table.concat(stats_parts, " · ") or ""
+            _updateColoredText(stats_w, final_text, CLR_TEXT_SUB_EFF)
+        end
+        _update(bstats, bd)
+        table.insert(_cd_update_funcs, _update)
+        meta[#meta+1] = stats_w
     end
 
     -- Final layout assembly
@@ -671,6 +694,8 @@ function M.build(w, ctx)
         final_vg,
     }
     result._cover_slots = cover_slots
+    result._cd_update_funcs = _cd_update_funcs
+    result._center_fp = fps[curIdx]
     return result
 end
 
@@ -693,6 +718,46 @@ function M.updateCovers(widget, _ctx)
     return all_done
 end
 
+function M.updateStats(widget, ctx)
+    local actual_widget = (widget._cd_update_funcs) and widget
+                          or (widget[1] and widget[1]._cd_update_funcs and widget[1])
+    if not actual_widget or not actual_widget._cd_update_funcs then return false end
+    
+    local fp = actual_widget._center_fp
+    if not fp then return false end
+
+    local bstats
+    local pre = ctx.coverdeck_center_stats
+    if pre and pre.fp == fp then
+        bstats = pre.stats
+    end
+    
+    local prefetched_entry = ctx.prefetched and ctx.prefetched[fp]
+    if not bstats then
+        local md5 = prefetched_entry and prefetched_entry.partial_md5_checksum
+        if not md5 then
+            local DS = require("docsettings")
+            local ok_ds, ds = pcall(DS.open, DS, fp)
+            if ok_ds and ds then
+                md5 = ds:readSetting("partial_md5_checksum")
+                pcall(function() ds:close() end)
+            end
+        end
+        if md5 then
+            bstats = fetchBookStats(md5, ctx.db_conn, ctx, true)
+        end
+    end
+    
+    if bstats then
+        local SH = getSH()
+        local bd = SH.getBookData(fp, prefetched_entry)
+        for _, fn in ipairs(actual_widget._cd_update_funcs) do
+            fn(bstats, bd)
+        end
+    end
+    return true
+end
+
 function M.getHeight(ctx)
     local pfx         = ctx and ctx.pfx or ""
     local scale       = Config.getModuleScale("coverdeck", pfx)
@@ -711,7 +776,7 @@ function M.getHeight(ctx)
     local has_meta = false
     if vis.progress then
         has_meta = true
-        h = h + math.floor(Screen:scaleBySize(7) * scale)  -- matches bar_h in build()
+        h = h + math.floor(Screen:scaleBySize(8) * scale)   -- matches bar_h in build()
     end
 
     if vis.has_stat then
@@ -742,6 +807,7 @@ function M.getMenuItems(ctx_menu)
             checked_func   = function() return _showElem(pfx, key) end,
             keep_menu_open = true,
             callback       = function() _toggleElem(pfx, key); refresh() end,
+            sui_hidden     = ctx_menu.is_sui or nil,
         }
     end
 
@@ -779,6 +845,7 @@ function M.getMenuItems(ctx_menu)
             {
                 text         = _lc("Recent Books"), radio = true,
                 checked_func = function() return getSource(pfx) == "recent" end,
+                keep_menu_open = true,
                 callback     = function()
                     SUISettings:saveSetting(pfx .. SETTING_SOURCE, "recent")
                     refresh()
@@ -787,6 +854,7 @@ function M.getMenuItems(ctx_menu)
             {
                 text         = _lc("To Be Read"), radio = true,
                 checked_func = function() return getSource(pfx) == "tbr" end,
+                keep_menu_open = true,
                 callback     = function()
                     SUISettings:saveSetting(pfx .. SETTING_SOURCE, "tbr")
                     refresh()
@@ -801,6 +869,7 @@ function M.getMenuItems(ctx_menu)
             {
                 text         = _lc("Above"), radio = true,
                 checked_func = function() return getTitlePos(pfx) == "above" end,
+                keep_menu_open = true,
                 callback     = function()
                     SUISettings:saveSetting(pfx .. SETTING_TITLE_POS, "above")
                     refresh()
@@ -809,6 +878,7 @@ function M.getMenuItems(ctx_menu)
             {
                 text         = _lc("Below"), radio = true,
                 checked_func = function() return getTitlePos(pfx) == "below" end,
+                keep_menu_open = true,
                 callback     = function()
                     SUISettings:saveSetting(pfx .. SETTING_TITLE_POS, "below")
                     refresh()
@@ -825,6 +895,7 @@ function M.getMenuItems(ctx_menu)
             {
                 text      = _lc("Arrange Statistics"),
                 separator = true,
+                keep_menu_open = true,
                 callback  = function()
                     local sort_items = {}
                     for _i, key in ipairs(_getElemOrder(pfx)) do
@@ -835,23 +906,24 @@ function M.getMenuItems(ctx_menu)
                             }
                         end
                     end
+                    local function on_save()
+                        local new_order = {}
+                        for _i, item in ipairs(sort_items) do
+                            new_order[#new_order+1] = item.orig_item
+                        end
+                        local active_set = {}
+                        for _i, k in ipairs(new_order) do active_set[k] = true end
+                        for _i, k in ipairs(_getElemOrder(pfx)) do
+                            if not active_set[k] then new_order[#new_order+1] = k end
+                        end
+                        SUISettings:saveSetting(pfx .. ELEM_ORDER_KEY, new_order)
+                        refresh()
+                    end
                     _UIManager:show(SortWidget:new{
                         title             = _lc("Arrange Statistics"),
                         item_table        = sort_items,
                         covers_fullscreen = true,
-                        callback          = function()
-                            local new_order = {}
-                            for _i, item in ipairs(sort_items) do
-                                new_order[#new_order+1] = item.orig_item
-                            end
-                            local active_set = {}
-                            for _i, k in ipairs(new_order) do active_set[k] = true end
-                            for _i, k in ipairs(_getElemOrder(pfx)) do
-                                if not active_set[k] then new_order[#new_order+1] = k end
-                            end
-                            SUISettings:saveSetting(pfx .. ELEM_ORDER_KEY, new_order)
-                            refresh()
-                        end,
+                        callback          = on_save,
                     })
                 end,
             },
@@ -860,13 +932,108 @@ function M.getMenuItems(ctx_menu)
             toggle_item("Time read",        "book_time"),
             toggle_item("Time remaining",   "book_remaining"),
         },
+            sui_build = ctx_menu.is_sui and function(ctx, _item)
+                local SUIWindow = require("sui_window")
+                return SUIWindow.ListRow{
+                    title        = _lc("Items"),
+                    subtitle     = function()
+                        local names = {}
+                        for _, key in ipairs(_getElemOrder(pfx)) do
+                            if _showElem(pfx, key) then
+                                names[#names + 1] = _lc(_ELEM_LABELS[key])
+                            end
+                        end
+                        return #names > 0 and table.concat(names, "  ·  ") or _lc("No items selected.")
+                    end,
+                    inner_w      = ctx.inner_w,
+                    show_chevron = true,
+                    on_tap       = function()
+                        local sort_items = {}
+                        for _, key in ipairs(_getElemOrder(pfx)) do
+                            if _showElem(pfx, key) then
+                                sort_items[#sort_items+1] = { text = _lc(_ELEM_LABELS[key]), orig_item = key }
+                            end
+                        end
+                        
+                        ctx.push("arrange", {
+                            title = _lc("Items"),
+                            items = sort_items,
+                            empty_text = _lc("No items selected."),
+                            on_delete = function(item)
+                                _toggleElem(pfx, item.orig_item)
+                            end,
+                            on_change = function(items_to_save)
+                                local new_order  = {}
+                                local active_set = {}
+                                for _, it in ipairs(items_to_save) do
+                                    new_order[#new_order + 1] = it.orig_item
+                                    active_set[it.orig_item]  = true
+                                end
+                                for _, k in ipairs(_getElemOrder(pfx)) do
+                                    if not active_set[k] then new_order[#new_order + 1] = k end
+                                end
+                                SUISettings:saveSetting(pfx .. ELEM_ORDER_KEY, new_order)
+                                refresh()
+                            end,
+                            footer_text = _lc("Add Item"),
+                        footer_enabled = function()
+                                for _, key in ipairs(_getElemOrder(pfx)) do
+                                    if not _showElem(pfx, key) then return true end
+                                end
+                                return false
+                            end,
+                            footer_action = function(ctx2)
+                                local picker_items = {}
+                                for _, key in ipairs(_getElemOrder(pfx)) do
+                                    if not _showElem(pfx, key) then
+                                        local _key   = key
+                                        local _label = _lc(_ELEM_LABELS[key])
+                                        picker_items[#picker_items + 1] = {
+                                            text   = _label,
+                                            on_tap = function(picker_ctx)
+                                                _toggleElem(pfx, _key)
+                                                local new_order = {}
+                                                local active_set = {}
+                                                for _, k in ipairs(_getElemOrder(pfx)) do
+                                                    if _showElem(pfx, k) and k ~= _key then
+                                                        new_order[#new_order + 1] = k
+                                                        active_set[k] = true
+                                                    end
+                                                end
+                                                new_order[#new_order + 1] = _key
+                                                active_set[_key] = true
+                                                for _, k in ipairs(_getElemOrder(pfx)) do
+                                                    if not active_set[k] then
+                                                        new_order[#new_order + 1] = k
+                                                    end
+                                                end
+                                                SUISettings:saveSetting(pfx .. ELEM_ORDER_KEY, new_order)
+                                                
+                                                table.insert(sort_items, { text = _label, orig_item = _key })
+                                                
+                                                refresh()
+                                                picker_ctx.pop()
+                                                ctx2.repaint()
+                                            end,
+                                        }
+                                    end
+                                end
+                                ctx2.push("item_picker", {
+                                    title = _lc("Add Item"),
+                                    items = picker_items,
+                                })
+                            end,
+                        })
+                    end
+                }
+            end or nil,
     }
 
     local menu = {}
-    for _i, item in ipairs(scale_items) do menu[#menu+1] = item end
     menu[#menu+1] = source_item
-    menu[#menu+1] = title_pos_item
     menu[#menu+1] = items_item
+    for _i, item in ipairs(scale_items) do menu[#menu+1] = item end
+    menu[#menu+1] = title_pos_item
     menu[#menu+1] = {
         text           = _lc("Show finished books"),
         checked_func   = function() return showFinished(pfx) end,
@@ -874,6 +1041,34 @@ function M.getMenuItems(ctx_menu)
         callback       = function()
             SUISettings:saveSetting(pfx .. SETTING_SHOW_FINISHED, not showFinished(pfx))
             refresh()
+        end,
+    }
+    menu[#menu+1] = {
+        text           = _lc("Update Stats Now"),
+        separator      = true,
+        keep_menu_open = true,
+        callback       = function()
+            local SP = package.loaded["desktop_modules/module_stats_provider"]
+            if SP and SP.invalidate then SP.invalidate() end
+            local SH = package.loaded["desktop_modules/module_books_shared"]
+            if SH and SH.invalidateSidecarCache then SH.invalidateSidecarCache() end
+            local MC = package.loaded["desktop_modules/module_currently"]
+            if MC and MC.invalidateCache then MC.invalidateCache() end
+            local MCD = package.loaded["desktop_modules/module_coverdeck"]
+            if MCD and MCD.invalidateCache then MCD.invalidateCache() end
+            
+            local HS = package.loaded["sui_homescreen"]
+            if HS then
+                HS._cached_books_state = nil
+                HS._cfg_cache = nil
+                if HS._instance then
+                    HS._instance:_refreshImmediate(false)
+                end
+            end
+            if ctx_menu and type(ctx_menu.refresh) == "function" then ctx_menu.refresh() elseif refresh then refresh() end
+            local InfoMessage = ctx_menu and ctx_menu.InfoMessage or require("ui/widget/infomessage")
+            local UIM = ctx_menu and ctx_menu.UIManager or require("ui/uimanager")
+            UIM:show(InfoMessage:new{ text = _lc("Stats updated successfully."), timeout = 2 })
         end,
     }
     return menu

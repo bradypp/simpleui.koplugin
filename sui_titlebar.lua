@@ -42,19 +42,6 @@ local _BM_SLOT = {
     tags   = "sui_browse_tags",
 }
 
--- Returns the effective icon path for a browse mode, respecting SUIStyle overrides.
-local function _browseIcon(mode)
-    local _ss = SUIStyle()
-    if _ss then
-        local slot = _BM_SLOT[mode]
-        if slot then
-            local override = _ss.getIcon(slot)
-            if override then return override end
-        end
-    end
-    return _BROWSE_ICONS_DEFAULT[mode] or _BROWSE_ICONS_DEFAULT.normal
-end
-
 local M = {}
 
 
@@ -77,10 +64,10 @@ end
 -- Settings keys and defaults
 -- ---------------------------------------------------------------------------
 
-local SETTING_KEY = "simpleui_titlebar_custom"
+local SETTING_KEY = "simpleui_tb_custom"
 local FM_CFG_KEY  = "simpleui_tb_fm_cfg"
 local SUB_CFG_KEY = "simpleui_tb_sub_cfg"
-local SIZE_KEY    = "simpleui_tb_size"
+local SIZE_KEY    = "simpleui_tb_size_pct"
 
 local _SIZE_SCALE = { compact = 0.75, default = 1.0, large = 1.3 }
 
@@ -342,10 +329,45 @@ end
 local function _resizeAndStrip(btn, new_w, keep_top_pad)
     btn.width  = new_w
     btn.height = new_w
+    if type(btn.icon) == "string" and btn.icon:match("^nerd:") then
+        btn.icon = nil
+    end
+    if type(btn.file) == "string" and btn.file:match("^nerd:") then
+        btn.file = nil
+    end
     if btn.image then
+        -- Safety guard: clear stale Nerd Font strings left by older plugin versions
+        -- before they crash ImageWidget:getSize() during btn:update().
+        if type(btn.image.file) == "string" and btn.image.file:match("^nerd:") then
+            btn.image.file = nil
+        end
+        if type(btn.image.icon) == "string" and btn.image.icon:match("^nerd:") then
+            btn.image.icon = nil
+        end
         btn.image.width  = new_w
         btn.image.height = new_w
-        _reloadImage(btn.image)
+        if btn.image.is_sui_wrapper then
+            local font_size = math.floor(math.min(new_w, new_w) * 0.65)
+            local Font = require("ui/font")
+            btn.image.face = Font:getFace(SUIStyle().FACE_ICONS, font_size)
+        else
+            _reloadImage(btn.image)
+        end
+    end
+    if btn.label_widget and type(btn.label_widget.file) == "string" and btn.label_widget.file:match("^nerd:") then
+        btn.label_widget.file = nil
+    end
+    if btn.label_widget and type(btn.label_widget.icon) == "string" and btn.label_widget.icon:match("^nerd:") then
+        btn.label_widget.icon = nil
+    end
+    if btn.label_widget then
+        btn.label_widget.width  = new_w
+        btn.label_widget.height = new_w
+        if btn.label_widget.is_sui_wrapper then
+            local font_size = math.floor(math.min(new_w, new_w) * 0.65)
+            local Font = require("ui/font")
+            btn.label_widget.face = Font:getFace(SUIStyle().FACE_ICONS, font_size)
+        end
     end
     btn.padding_left   = 0
     btn.padding_right  = 0
@@ -386,29 +408,13 @@ end
 -- Restores a button from a snapshot produced by _snapBtn.
 local function _restoreBtn(btn, snap)
     if not snap then return end
-    if btn.image then
-        if snap.image_icon ~= nil then
-            -- Restore the original .icon field (may be nil to clear an override).
+    local _ss = SUIStyle()
+    if _ss and _ss.restoreDefaultIcon then
+        _ss.restoreDefaultIcon(btn, snap.image_icon, snap.icon)
+    else
+        if btn.image then
             btn.image.icon = snap.image_icon
-            -- When the original button used a symbolic icon name (.icon non-nil),
-            -- we must also clear .file even if snap.icon has a value.  Otherwise
-            -- a stale path written into .file by a previous _applyBackButtonState
-            -- call (e.g. the search button's custom icon path bled into lb.image.file)
-            -- will survive the restore and then win over the symbolic name in the
-            -- next init(), because KOReader's ImageWidget:init() checks .icon first
-            -- but some call paths reach .file as a fallback — and a non-nil .file
-            -- can confuse the resolution entirely.
-            -- Safe to nil here: if snap.image_icon is set, the button is driven by
-            -- the symbolic name, not a raw file path.
-            if snap.image_icon ~= nil and snap.image_icon ~= "" then
-                btn.image.file = nil
-            elseif snap.icon then
-                btn.image.file = snap.icon
-            end
-        elseif snap.icon then
             btn.image.file = snap.icon
-        end
-        if snap.icon or snap.image_icon ~= nil then
             _reloadImage(btn.image)
         end
     end
@@ -540,11 +546,16 @@ function M.apply(fm_self)
         tb.setRightIcon = function(tb_self, icon, ...)
             local result = orig_setRightIcon(tb_self, icon, ...)
             if icon == "plus" and _icon_enabled then
-                if tb_self.right_button and tb_self.right_button.image then
+                if tb_self.right_button then
                     local _ss = SUIStyle()
-                    local _custom = _ss and _ss.getIcon("sui_menu")
-                    tb_self.right_button.image.file = _custom or Config.ICON.ko_menu
-                    _reloadImage(tb_self.right_button.image)
+                    if not (_ss and _ss.applyIconToBtn("sui_menu", tb_self.right_button)) then
+                        if _ss and _ss.restoreDefaultIcon then
+                            _ss.restoreDefaultIcon(tb_self.right_button, nil, Config.ICON.ko_menu)
+                        elseif tb_self.right_button.image then
+                            tb_self.right_button.image.file = Config.ICON.ko_menu
+                            _reloadImage(tb_self.right_button.image)
+                        end
+                    end
                 end
                 UIManager:setDirty(tb_self.show_parent, "ui", tb_self.dimen)
             end
@@ -552,12 +563,16 @@ function M.apply(fm_self)
         end
 
         if show_menu then
-            if rb.image then
-                local _ss = SUIStyle()
-                rb.image.file = (_ss and _ss.getIcon("sui_menu")) or Config.ICON.ko_menu
-                _reloadImage(rb.image)
+            placeBtn("fm_menu", rb)
+            local _ss = SUIStyle()
+            if not (_ss and _ss.applyIconToBtn("sui_menu", rb)) then
+                if _ss and _ss.restoreDefaultIcon then
+                    _ss.restoreDefaultIcon(rb, nil, Config.ICON.ko_menu)
+                elseif rb.image then
+                    rb.image.file = Config.ICON.ko_menu
+                    _reloadImage(rb.image)
+                end
             end
-        placeBtn("fm_menu", rb)
         else
             rb.overlap_align  = nil
             -- Improvement #6: use defensive 2× width offset.
@@ -681,17 +696,15 @@ function M.apply(fm_self)
                             -- KOReader's ImageWidget:init() gives precedence to .icon over
                             -- .file, so whichever field we do NOT want must be nil-ed.
                             local _ss        = SUIStyle()
-                            local custom_back = _ss and _ss.getIcon("sui_back")
-                            if custom_back then
-                                btn.image.icon = nil
-                                btn.image.file = custom_back
-                                pcall(btn.image.free, btn.image)
-                                pcall(btn.image.init, btn.image)
-                            else
-                                btn.image.file = nil
-                                btn.image.icon = ICON_UP
-                                pcall(btn.image.free, btn.image)
-                                pcall(btn.image.init, btn.image)
+                            if not (_ss and _ss.applyIconToBtn("sui_back", btn)) then
+                                if _ss and _ss.restoreDefaultIcon then
+                                    _ss.restoreDefaultIcon(btn, ICON_UP, nil)
+                                elseif btn.image then
+                                    btn.image.file = nil
+                                    btn.image.icon = ICON_UP
+                                    pcall(btn.image.free, btn.image)
+                                    pcall(btn.image.init, btn.image)
+                                end
                             end
                             btn.overlap_offset = {
                                 _buttonX("left", up_slot, iw, pad, gap, sw), 0
@@ -933,17 +946,16 @@ function M.apply(fm_self)
 
                 -- Resolve initial icon from the current browse mode.
                 -- Improvement #4: use cached _BrowseMeta().
-                local _initial_icon = _browseIcon("normal")
                 local BM0 = _BrowseMeta()
+                local mode0 = "normal"
                 if BM0 then
                     local fc0  = fm_self.file_chooser
-                    local mode = fc0 and BM0.getCurrentMode(fc0) or "normal"
-                    _initial_icon = _browseIcon(mode)
+                    mode0 = fc0 and BM0.getCurrentMode(fc0) or "normal"
                 end
 
                 local browse_btn
                 browse_btn = IconButton:new{
-                    icon        = _initial_icon,
+                    icon        = "appbar.menu",
                     width       = iw,
                     height      = iw,
                     padding     = btn_padding,
@@ -962,11 +974,19 @@ function M.apply(fm_self)
                         local function _navigate(dlg, mode)
                             UIManager:close(dlg)
                             BM.navigateTo(fm_self, mode)
-                            if browse_btn.image then
-                                browse_btn.image.file = _browseIcon(mode)
-                                _reloadImage(browse_btn.image)
-                                UIManager:setDirty(tb.show_parent or fm_self, "ui", tb.dimen)
+                            local _ss = SUIStyle()
+                            if not (_ss and _ss.applyIconToBtn(_BM_SLOT[mode], browse_btn)) then
+                                if _ss and _ss.restoreDefaultIcon then
+                                    _ss.restoreDefaultIcon(browse_btn, nil, _BROWSE_ICONS_DEFAULT[mode] or _BROWSE_ICONS_DEFAULT.normal)
+                                elseif browse_btn.image then
+                                    browse_btn.image.file = _BROWSE_ICONS_DEFAULT[mode] or _BROWSE_ICONS_DEFAULT.normal
+                                    _reloadImage(browse_btn.image)
+                                elseif browse_btn.label_widget then
+                                    browse_btn.label_widget.file = _BROWSE_ICONS_DEFAULT[mode] or _BROWSE_ICONS_DEFAULT.normal
+                                    _reloadImage(browse_btn.label_widget)
+                                end
                             end
+                            UIManager:setDirty(tb.show_parent or fm_self, "ui", tb.dimen)
                         end
                         local dlg
                         dlg = ButtonDialog:new{
@@ -985,11 +1005,14 @@ function M.apply(fm_self)
                 }
 
                 _resizeAndStrip(browse_btn, iw)
-                -- Re-apply the initial icon after update() in case IconButton:new
-                -- rendered a stale fallback during :init().
-                if browse_btn.image then
-                    browse_btn.image.file = _initial_icon
-                    _reloadImage(browse_btn.image)
+                local _ss = SUIStyle()
+                if not (_ss and _ss.applyIconToBtn(_BM_SLOT[mode0], browse_btn)) then
+                    if _ss and _ss.restoreDefaultIcon then
+                        _ss.restoreDefaultIcon(browse_btn, nil, _BROWSE_ICONS_DEFAULT[mode0] or _BROWSE_ICONS_DEFAULT.normal)
+                    elseif browse_btn.image then
+                        browse_btn.image.file = _BROWSE_ICONS_DEFAULT[mode0] or _BROWSE_ICONS_DEFAULT.normal
+                        _reloadImage(browse_btn.image)
+                    end
                 end
                 browse_btn.overlap_align  = nil
                 browse_btn.overlap_offset = { _buttonX(s.side, s.slot, iw, pad, gap, sw), 0 }
@@ -1015,14 +1038,21 @@ function M.apply(fm_self)
                     fc_b._simpleui_gen_listeners[#fc_b._simpleui_gen_listeners + 1] = function(fc_self)
                         -- Improvement #4: use cached _BrowseMeta().
                         local BM2 = _BrowseMeta()
-                        if BM2 and browse_btn.image then
+                        if BM2 and browse_btn then
                             local mode2 = BM2.getCurrentMode(fc_self)
-                            local icon2 = _browseIcon(mode2)
-                            if browse_btn.image.file ~= icon2 then
-                                browse_btn.image.file = icon2
-                                _reloadImage(browse_btn.image)
-                                UIManager:setDirty(tb.show_parent or fm_self, "ui", tb.dimen)
+                            local _ss2 = SUIStyle()
+                            if not (_ss2 and _ss2.applyIconToBtn(_BM_SLOT[mode2], browse_btn)) then
+                                if _ss2 and _ss2.restoreDefaultIcon then
+                                    _ss2.restoreDefaultIcon(browse_btn, nil, _BROWSE_ICONS_DEFAULT[mode2] or _BROWSE_ICONS_DEFAULT.normal)
+                                elseif browse_btn.image then
+                                    browse_btn.image.file = _BROWSE_ICONS_DEFAULT[mode2] or _BROWSE_ICONS_DEFAULT.normal
+                                    _reloadImage(browse_btn.image)
+                                elseif browse_btn.label_widget then
+                                    browse_btn.label_widget.file = _BROWSE_ICONS_DEFAULT[mode2] or _BROWSE_ICONS_DEFAULT.normal
+                                    _reloadImage(browse_btn.label_widget)
+                                end
                             end
+                            UIManager:setDirty(tb.show_parent or fm_self, "ui", tb.dimen)
                         end
                     end
                     fm_self._titlebar_browse_gen_hooked = true
@@ -1200,15 +1230,17 @@ function M.applyToSub(widget)
                 if icon == "appbar.menu" then
                     -- Host is restoring the hamburger — re-apply custom icon.
                     widget._titlebar_sub_lb_is_menu = true
-                    if tb_self.left_button and tb_self.left_button.image then
+                    if tb_self.left_button then
                         local _ss2 = SUIStyle()
-                        local _custom = _ss2 and _ss2.getIcon("sui_menu")
-                        if _custom then
-                            tb_self.left_button.image.icon = nil
-                            tb_self.left_button.image.file = _custom
-                            _reloadImage(tb_self.left_button.image)
-                            UIManager:setDirty(tb_self.show_parent or widget, "ui", tb_self.dimen)
+                        if not (_ss2 and _ss2.applyIconToBtn("sui_menu", tb_self.left_button)) then
+                            if _ss2 and _ss2.restoreDefaultIcon then
+                                _ss2.restoreDefaultIcon(tb_self.left_button, nil, Config.ICON.ko_menu)
+                            elseif tb_self.left_button.image then
+                                tb_self.left_button.image.file = Config.ICON.ko_menu
+                                _reloadImage(tb_self.left_button.image)
+                            end
                         end
+                        UIManager:setDirty(tb_self.show_parent or widget, "ui", tb_self.dimen)
                     end
                 else
                     -- Any other icon (e.g. "check"): record that we are NOT in
@@ -1300,16 +1332,14 @@ function M.applyToSub(widget)
                         -- init() gives precedence to .icon, so whichever we do NOT want
                         -- must be nilled explicitly.
                         local _ss = SUIStyle()
-                        local custom_back = _ss and _ss.getIcon("sui_back")
-                        if custom_back then
-                            btn.image.icon = nil
-                            btn.image.file = custom_back
-                        else
-                            btn.image.file = nil
-                            btn.image.icon = ICON_UP
+                        if not (_ss and _ss.applyIconToBtn("sui_back", btn)) then
+                            if btn.image then
+                                btn.image.file = nil
+                                btn.image.icon = ICON_UP
+                                pcall(btn.image.free, btn.image)
+                                pcall(btn.image.init, btn.image)
+                            end
                         end
-                        pcall(btn.image.free, btn.image)
-                        pcall(btn.image.init, btn.image)
 
                         local sl = slot_map["sub_back"]
                         if sl then
@@ -1470,21 +1500,29 @@ end
 function M.refreshBrowseIcons(fm)
     if not (fm and fm._titlebar_browse_btn) then return end
     local browse_btn = fm._titlebar_browse_btn
-    if not (browse_btn and browse_btn.image) then return end
+    if not browse_btn then return end
 
     local BM = _BrowseMeta()
     local mode = "normal"
     if BM and fm.file_chooser then
         mode = BM.getCurrentMode(fm.file_chooser) or "normal"
     end
-    local new_icon = _browseIcon(mode)
-    if browse_btn.image.file ~= new_icon then
-        browse_btn.image.file = new_icon
-        _reloadImage(browse_btn.image)
-        local ok_ui, UIManager = pcall(require, "ui/uimanager")
-        if ok_ui and fm._titlebar then
-            UIManager:setDirty(fm, "ui", fm._titlebar.dimen)
+    
+    local _ss = SUIStyle()
+    if not (_ss and _ss.applyIconToBtn(_BM_SLOT[mode], browse_btn)) then
+        if _ss and _ss.restoreDefaultIcon then
+            _ss.restoreDefaultIcon(browse_btn, nil, _BROWSE_ICONS_DEFAULT[mode] or _BROWSE_ICONS_DEFAULT.normal)
+        elseif browse_btn.image then
+            browse_btn.image.file = _BROWSE_ICONS_DEFAULT[mode] or _BROWSE_ICONS_DEFAULT.normal
+            _reloadImage(browse_btn.image)
+        elseif browse_btn.label_widget then
+            browse_btn.label_widget.file = _BROWSE_ICONS_DEFAULT[mode] or _BROWSE_ICONS_DEFAULT.normal
+            _reloadImage(browse_btn.label_widget)
         end
+    end
+    local ok_ui, UIManager = pcall(require, "ui/uimanager")
+    if ok_ui and fm.title_bar then
+        UIManager:setDirty(fm, "ui", fm.title_bar.dimen)
     end
 end
 

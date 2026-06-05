@@ -25,22 +25,23 @@ local Screen          = Device.screen
 local _  = require("sui_i18n").translate
 local N_ = require("sui_i18n").ngettext
 local Config = require("sui_config")
-local QA     = require("sui_quickactions")
+local QA          = require("sui_quickactions")
 local UI          = require("sui_core")
 local SUISettings = require("sui_store")
+local SUIStyle    = require("sui_style")
 local PAD         = UI.PAD
 local CLR_TEXT_SUB = UI.CLR_TEXT_SUB
 
-local _BASE_PH_FS = Screen:scaleBySize(11)
+local _BASE_PH_FS = SUIStyle.FS_BODY    -- 18: placeholder text
 
 -- ---------------------------------------------------------------------------
 -- Base dimensions (at 100% scale)
 -- ---------------------------------------------------------------------------
-local _BASE_ROW_H    = Screen:scaleBySize(52)   -- height of each row
+local _BASE_ROW_H    = Screen:scaleBySize(42)   -- height of each row
 local _BASE_ICON_SZ  = Screen:scaleBySize(32)   -- icon square size
-local _BASE_FS       = Screen:scaleBySize(18)   -- label font size
+local _BASE_FS       = SUIStyle.FS_TITLE         -- 22: label font size
 local _BASE_ICON_GAP = Screen:scaleBySize(16)   -- gap between icon and text
-local _BASE_ROW_GAP  = Screen:scaleBySize(4)    -- vertical gap between rows
+local _BASE_ROW_GAP  = Screen:scaleBySize(0)    -- vertical gap between rows
 
 local function _getDims(scale)
     scale = scale or 1.0
@@ -101,12 +102,15 @@ local function buildListWidget(w, action_ids, show_icons, align, on_tap_fn, d, c
 
     -- Placeholder: no actions configured at all
     if not action_ids or #action_ids == 0 then
-        local ph_fs = math.max(8, math.floor(_BASE_PH_FS * (d.row_h / _BASE_ROW_H)))
+        local ph_fs   = math.max(8, math.floor(_BASE_PH_FS * (d.row_h / _BASE_ROW_H)))
+        local hold_on = SUISettings:nilOrTrue("simpleui_hs_settings_on_hold")
+        local ph_text = hold_on and _("No actions configured  —  long press to configure")
+                                 or _("No actions configured")
         return CenterContainer:new{
             dimen = Geom:new{ w = w, h = d.row_h },
             UI.makeColoredText{
-                text    = _("No actions configured"),
-                face    = Font:getFace("smallinfofont", ph_fs),
+                text    = ph_text,
+                face    = Font:getFace(SUIStyle.FACE_REGULAR, ph_fs),
                 fgcolor = clr_sub,
                 width   = w - PAD * 2,
             },
@@ -125,12 +129,15 @@ local function buildListWidget(w, action_ids, show_icons, align, on_tap_fn, d, c
     end
     -- Placeholder: actions were saved but none are valid anymore
     if #valid_ids == 0 then
-        local ph_fs = math.max(8, math.floor(_BASE_PH_FS * (d.row_h / _BASE_ROW_H)))
+        local ph_fs   = math.max(8, math.floor(_BASE_PH_FS * (d.row_h / _BASE_ROW_H)))
+        local hold_on = SUISettings:nilOrTrue("simpleui_hs_settings_on_hold")
+        local ph_text = hold_on and _("No actions configured  —  long press to configure")
+                                 or _("No actions configured")
         return CenterContainer:new{
             dimen = Geom:new{ w = w, h = d.row_h },
             UI.makeColoredText{
-                text    = _("No actions configured"),
-                face    = Font:getFace("smallinfofont", ph_fs),
+                text    = ph_text,
+                face    = Font:getFace(SUIStyle.FACE_REGULAR, ph_fs),
                 fgcolor = clr_sub,
                 width   = w - PAD * 2,
             },
@@ -158,29 +165,42 @@ local function buildListWidget(w, action_ids, show_icons, align, on_tap_fn, d, c
                     dimen = Geom:new{ w = d.icon_sz, h = d.row_h },
                     UI.makeColoredText{
                         text    = nerd_char,
-                        face    = Font:getFace("symbols", math.floor(d.icon_sz * 0.85)),
+                        face    = Font:getFace(SUIStyle.FACE_ICONS, math.floor(d.icon_sz * 0.85)),
                         fgcolor = clr_blk,
                         padding = 0,
                     },
                 }
             else
-                icon_widget = CenterContainer:new{
-                    dimen = Geom:new{ w = d.icon_sz, h = d.row_h },
-                    ImageWidget:new{
+                local iw = ImageWidget:new{
                         file    = entry.icon,
                         width   = d.icon_sz,
                         height  = d.icon_sz,
                         is_icon = true,
                         alpha   = true,
-                    },
                 }
+                if pcall(function() iw:_render() end) then
+                    icon_widget = CenterContainer:new{
+                        dimen = Geom:new{ w = d.icon_sz, h = d.row_h },
+                        iw,
+                    }
+                else
+                    iw:free()
+                    icon_widget = CenterContainer:new{
+                        dimen = Geom:new{ w = d.icon_sz, h = d.row_h },
+                        TextWidget:new{
+                            text    = (entry.label and entry.label:sub(1,1):upper() or "?"),
+                            face    = Font:getFace("cfont", math.floor(d.icon_sz * 0.55)),
+                            fgcolor = clr_blk,
+                        },
+                    }
+                end
             end
         end
 
         -- ── Label ─────────────────────────────────────────────────────────
         local label_tw = UI.makeColoredText{
             text    = entry.label,
-            face    = Font:getFace("cfont", d.fs),
+            face    = Font:getFace(SUIStyle.FACE_REGULAR, d.fs),
             fgcolor = clr_blk,
             width   = text_w,
             padding = 0,
@@ -352,67 +372,6 @@ function M.getMenuItems(ctx_menu)
     local _lc     = ctx_menu._
     local items   = {}
 
-    -- Scale
-    items[#items + 1] = Config.makeScaleItem({
-        text_func    = function() return _lc("Scale") end,
-        enabled_func = function() return not Config.isScaleLinked() end,
-        title        = _lc("Scale"),
-        info         = _lc("Scale for this module.\n100% is the default size."),
-        get          = function() return Config.getModuleScalePct(MOD_ID, pfx) end,
-        set          = function(v) Config.setModuleScale(v, MOD_ID, pfx) end,
-        refresh      = refresh,
-    })
-
-    -- Text Size
-    items[#items + 1] = Config.makeScaleItem({
-        text_func    = function() return _lc("Text Size") end,
-        separator    = true,
-        title        = _lc("Text Size"),
-        info         = _lc("Scale for the label text.\n100% is the default size."),
-        get          = function() return Config.getItemLabelScalePct(MOD_ID, pfx) end,
-        set          = function(v) Config.setItemLabelScale(v, MOD_ID, pfx) end,
-        refresh      = refresh,
-    })
-
-    -- Hide Icon toggle
-    items[#items + 1] = {
-        text           = _lc("Hide Icon"),
-        checked_func   = function() return isIconHidden(pfx, MOD_SUFFIX) end,
-        keep_menu_open = true,
-        callback       = function()
-            SUISettings:saveSetting(pfx .. HIDE_ICON_KEY, not isIconHidden(pfx, MOD_SUFFIX))
-            refresh()
-        end,
-    }
-
-    -- Alignment submenu
-    items[#items + 1] = {
-        text_func = function()
-            return _lc("Alignment") .. " — " .. alignLabel(getAlignment(pfx, MOD_SUFFIX))
-        end,
-        separator      = true,
-        sub_item_table = {
-            {
-                text           = _lc("Left"),
-                checked_func   = function() return getAlignment(pfx, MOD_SUFFIX) == "left" end,
-                keep_menu_open = true,
-                callback       = function() setAlignment(pfx, MOD_SUFFIX, "left");   refresh() end,
-            },
-            {
-                text           = _lc("Center"),
-                checked_func   = function() return getAlignment(pfx, MOD_SUFFIX) == "center" end,
-                keep_menu_open = true,
-                callback       = function() setAlignment(pfx, MOD_SUFFIX, "center"); refresh() end,
-            },
-            {
-                text           = _lc("Right"),
-                checked_func   = function() return getAlignment(pfx, MOD_SUFFIX) == "right" end,
-                keep_menu_open = true,
-                callback       = function() setAlignment(pfx, MOD_SUFFIX, "right");  refresh() end,
-            },
-        },
-    }
-
     -- Items submenu (add/remove/arrange)
     local function getItems()
         return SUISettings:readSetting(pfx .. ITEMS_KEY) or {}
@@ -471,20 +430,21 @@ function M.getMenuItems(ctx_menu)
             for _, id in ipairs(qa_ids) do
                 sort_items[#sort_items + 1] = { text = pool_labels[id] or id, orig_item = id }
             end
+            local function on_save()
+                local new_order = {}
+                for _, item in ipairs(sort_items) do
+                    new_order[#new_order + 1] = item.orig_item
+                end
+                SUISettings:saveSetting(pfx .. ITEMS_KEY, new_order)
+                refresh()
+            end
             local SortWidget = ctx_menu.SortWidget or require("ui/widget/sortwidget")
             local uim        = ctx_menu.UIManager  or require("ui/uimanager")
             uim:show(SortWidget:new{
                 title             = string.format(_lc("Arrange %s"), M.name),
                 covers_fullscreen = true,
                 item_table        = sort_items,
-                callback          = function()
-                    local new_order = {}
-                    for _, item in ipairs(sort_items) do
-                        new_order[#new_order + 1] = item.orig_item
-                    end
-                    SUISettings:saveSetting(pfx .. ITEMS_KEY, new_order)
-                    refresh()
-                end,
+                callback          = on_save,
             })
         end,
     }
@@ -507,8 +467,145 @@ function M.getMenuItems(ctx_menu)
     end
 
     items[#items + 1] = {
-        text                = _lc("Items"),
+        text                = _lc("Quick Actions"),
         sub_item_table_func = function() return items_sub end,
+        sui_build = ctx_menu.is_sui and function(ctx, _item)
+            local SUIWindow = require("sui_window")
+            return SUIWindow.ListRow{
+                title        = _lc("Quick Actions"),
+                    subtitle     = function()
+                        local qa_ids = getItems()
+                        if #qa_ids == 0 then return _lc("No items selected.") end
+                        local pool_labels = {}
+                        for _, a in ipairs(getALPool()) do pool_labels[a.id] = a.label end
+                        local names = {}
+                        for _, id in ipairs(qa_ids) do
+                            names[#names + 1] = pool_labels[id] or id
+                        end
+                        return table.concat(names, "  ·  ")
+                    end,
+                inner_w      = ctx.inner_w,
+                    item_count   = function() return #getItems() end,
+                    max_items    = MAX_AL,
+                show_chevron = true,
+                on_tap       = function()
+                    local qa_ids = getItems()
+                    local pool_labels = {}
+                    for _, a in ipairs(getALPool()) do pool_labels[a.id] = a.label end
+                    local sort_items = {}
+                    for _, id in ipairs(qa_ids) do
+                        sort_items[#sort_items + 1] = { text = pool_labels[id] or id, orig_item = id }
+                    end
+                    
+                    ctx.push("arrange", {
+                        title = _lc("Quick Actions"),
+                        items = sort_items,
+                        empty_text = _lc("No items selected."),
+                            item_count = function() return #getItems() end,
+                            max_items  = MAX_AL,
+                        on_delete = function(item) end,
+                        on_change = function(items_to_save)
+                            local new_order = {}
+                            for _, it in ipairs(items_to_save) do new_order[#new_order + 1] = it.orig_item end
+                            SUISettings:saveSetting(pfx .. ITEMS_KEY, new_order)
+                            refresh()
+                        end,
+                        footer_text = _lc("Add Item"),
+                        footer_action = function(ctx2)
+                            local picker_items = {}
+                            local sorted_pool = {}
+                            for _, a in ipairs(getALPool()) do sorted_pool[#sorted_pool + 1] = a end
+                            table.sort(sorted_pool, function(a, b) return a.label:lower() < b.label:lower() end)
+
+                            for _, a in ipairs(sorted_pool) do
+                                if not isSelected(a.id) then
+                                    local _id = a.id
+                                    local _label = a.label
+                                    picker_items[#picker_items + 1] = {
+                                        text   = _label,
+                                        on_tap = function(picker_ctx)
+                                            local cur = getItems()
+                                            if #cur >= MAX_AL then
+                                                local InfoMessage = ctx_menu.InfoMessage or require("ui/widget/infomessage")
+                                                local uim = ctx_menu.UIManager or require("ui/uimanager")
+                                                local N_ = ctx_menu.N_ or require("sui_i18n").ngettext
+                                                uim:show(InfoMessage:new{
+                                                    text = string.format(N_("The maximum of %d action per module has been reached. Remove one first.",
+                                                           "The maximum of %d actions per module has been reached. Remove one first.", MAX_AL), MAX_AL), timeout = 2,
+                                                })
+                                                return
+                                            end
+                                            cur[#cur + 1] = _id
+                                            SUISettings:saveSetting(pfx .. ITEMS_KEY, cur)
+                                            refresh()
+                                            table.insert(sort_items, { text = _label, orig_item = _id })
+                                            picker_ctx.pop()
+                                            ctx2.repaint()
+                                        end,
+                                    }
+                                end
+                            end
+                            ctx2.push("item_picker", {
+                                title = _lc("Add Item"),
+                                items = picker_items,
+                            })
+                        end
+                    })
+                end
+            }
+        end or nil,
+    }
+
+    items[#items + 1] = Config.makeScaleItem({
+        text_func    = function() return _lc("Scale") end,
+        enabled_func = function() return not Config.isScaleLinked() end,
+        title        = _lc("Scale"),
+        info         = _lc("Scale for this module.\n100% is the default size."),
+        get          = function() return Config.getModuleScalePct(MOD_ID, pfx) end,
+        set          = function(v) Config.setModuleScale(v, MOD_ID, pfx) end,
+        refresh      = refresh,
+    })
+    items[#items + 1] = Config.makeScaleItem({
+        text_func    = function() return _lc("Text Size") end,
+        title        = _lc("Text Size"),
+        info         = _lc("Scale for the label text.\n100% is the default size."),
+        get          = function() return Config.getItemLabelScalePct(MOD_ID, pfx) end,
+        set          = function(v) Config.setItemLabelScale(v, MOD_ID, pfx) end,
+        refresh      = refresh,
+    })
+
+    items[#items + 1] = {
+        text           = _lc("Show Icon"),
+        checked_func   = function() return not isIconHidden(pfx, MOD_SUFFIX) end,
+        keep_menu_open = true,
+        callback       = function()
+            SUISettings:saveSetting(pfx .. HIDE_ICON_KEY, not isIconHidden(pfx, MOD_SUFFIX))
+            refresh()
+        end,
+    }
+    items[#items + 1] = {
+        text_func  = function() return _lc("Alignment") end,
+        value_func = function() return alignLabel(getAlignment(pfx, MOD_SUFFIX)) end,
+        sub_item_table = {
+            {
+                text           = _lc("Left"),
+                checked_func   = function() return getAlignment(pfx, MOD_SUFFIX) == "left" end,
+                keep_menu_open = true,
+                callback       = function() setAlignment(pfx, MOD_SUFFIX, "left");   refresh() end,
+            },
+            {
+                text           = _lc("Center"),
+                checked_func   = function() return getAlignment(pfx, MOD_SUFFIX) == "center" end,
+                keep_menu_open = true,
+                callback       = function() setAlignment(pfx, MOD_SUFFIX, "center"); refresh() end,
+            },
+            {
+                text           = _lc("Right"),
+                checked_func   = function() return getAlignment(pfx, MOD_SUFFIX) == "right" end,
+                keep_menu_open = true,
+                callback       = function() setAlignment(pfx, MOD_SUFFIX, "right");  refresh() end,
+            },
+        },
     }
 
     return items

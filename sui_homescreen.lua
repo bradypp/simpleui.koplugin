@@ -33,6 +33,7 @@ local Event            = require("ui/event")
 local Screen           = Device.screen
 local UI               = require("sui_core")
 local Bottombar        = require("sui_bottombar")
+local SUIStyle         = require("sui_style")
 local ImageWidget      = require("ui/widget/imagewidget")
 local lfs              = require("libs/libkoreader-lfs")
 
@@ -135,6 +136,7 @@ local function _styleGetBgWidget()
     -- image orientation best matches the current screen orientation.
     local rotation_angle = 0
     local img_w, img_h   = nil, nil
+    local raw_bb         = nil
     local pic = _getPic()
     if pic then
         local ok_d, doc = pcall(pic.openDocument, path)
@@ -143,6 +145,18 @@ local function _styleGetBgWidget()
             doc:close()
         end
     end
+    if not img_w or not img_h then
+    local ok_ri, RenderImage = pcall(require, "ui/renderimage")
+    if ok_ri and RenderImage then
+        local ok_bb, bb = pcall(RenderImage.renderImageFile, RenderImage, path, false, nil, nil)
+        if ok_bb and bb then
+            img_w = bb:getWidth()
+            img_h = bb:getHeight()
+            raw_bb = bb
+            end
+        end
+    end
+
     if _wpAutoRotate() and img_w and img_h and img_w > 0 and img_h > 0 then
         local img_landscape    = img_w > img_h
         local screen_landscape = sw    > sh
@@ -165,16 +179,19 @@ local function _styleGetBgWidget()
 
         local ok_ri, RenderImage = pcall(require, "ui/renderimage")
         if ok_ri and RenderImage then
-            -- Decode at native resolution (no max-bounds) so we get the raw
-            -- pixel data, then scale to exact eff_w×eff_h in one step.
-            -- Passing width/height to renderImageFile would do a proportional
-            -- fit first, producing a bitmap smaller than eff_w×eff_h, and
-            -- the subsequent :scale() call would then distort unevenly.
-            local ok_bb, raw_bb = pcall(RenderImage.renderImageFile, RenderImage,
-                path, false, nil, nil)
+            local ok_bb = true
+            if not raw_bb then
+                -- Decode at native resolution (no max-bounds) so we get the raw
+                -- pixel data, then scale to exact eff_w×eff_h in one step.
+                -- Passing width/height to renderImageFile would do a proportional
+                -- fit first, producing a bitmap smaller than eff_w×eff_h, and
+                -- the subsequent :scale() call would then distort unevenly.
+                ok_bb, raw_bb = pcall(RenderImage.renderImageFile, RenderImage, path, false, nil, nil)
+            end
             if ok_bb and raw_bb then
                 local ok_sc, scaled = pcall(function() return raw_bb:scale(eff_w, eff_h) end)
                 raw_bb:free()
+                raw_bb = nil
                 if ok_sc and scaled then
                     _style_bg_cache_bb = scaled
                     widget_opts = {
@@ -190,6 +207,11 @@ local function _styleGetBgWidget()
                 end
             end
         end
+    end
+
+    if raw_bb then
+        pcall(function() raw_bb:free() end)
+        raw_bb = nil
     end
 
     -- Fallback (stretch decode failed, or stretch disabled, or dimensions match):
@@ -257,7 +279,7 @@ end
 local PAD                = UI.PAD
 local MOD_GAP            = UI.MOD_GAP
 local SIDE_PAD           = UI.SIDE_PAD
-local SECTION_LABEL_SIZE = 11
+
 -- Static color defaults — overridden at render-time by theme roles when set.
 local _CLR_TEXT_MID_DEFAULT      = Blitbuffer.gray(0.45)
 local _DOT_COLOR_INACTIVE_DEFAULT = Blitbuffer.gray(0.55)
@@ -331,11 +353,9 @@ local Homescreen = { _instance = nil }
 -- ---------------------------------------------------------------------------
 local _EMPTY_H        = Screen:scaleBySize(80)
 local _EMPTY_TITLE_H  = Screen:scaleBySize(30)
-local _EMPTY_TITLE_FS = Screen:scaleBySize(18)
-local _EMPTY_GAP      = Screen:scaleBySize(12)
-local _EMPTY_SUB_H    = Screen:scaleBySize(20)
-local _EMPTY_SUB_FS   = Screen:scaleBySize(13)
-local _BASE_SECTION_LABEL_SIZE = Screen:scaleBySize(SECTION_LABEL_SIZE)
+local _EMPTY_GAP        = Screen:scaleBySize(12)
+local _face_empty_title = Font:getFace(SUIStyle.FACE_REGULAR,    SUIStyle.FS_TITLE)     -- FS_TITLE (22)
+local _face_empty_sub   = Font:getFace(SUIStyle.FACE_REGULAR,  SUIStyle.FS_SUBTITLE)  -- FS_SUBTITLE (20)
 
 -- Section label widget cache — keyed by "text|inner_w|scale_pct".
 -- Invalidated on screen resize/rotation via invalidateLabelCache().
@@ -346,31 +366,29 @@ local function invalidateLabelCache()
 end
 
 local function sectionLabel(text, w)
-    local scale     = Config.getLabelScale()
-    local fs        = math.max(8, math.floor(_BASE_SECTION_LABEL_SIZE * scale))
-    local label_h   = math.max(8, math.floor(Screen:scaleBySize(16) * scale))
-    local scale_pct = math.floor(scale * 100)
     -- Resolve theme fg color so labels honour the active palette.
     -- The color pointer is included in the cache key so that a theme change
     -- after the first render produces a fresh widget instead of reusing the
     -- stale one (the cache is also invalidated on rebuildLayout, but this
     -- guards against within-session theme switches without a full rebuild).
-    local ok_ss, SUIStyle = pcall(require, "sui_style")
-    local _label_fg = ok_ss and SUIStyle and SUIStyle.getThemeColor("fg")
+        local _label_fg = SUIStyle.getThemeColor("fg")
+    
+    local scale = Config.getLabelScale()
+    local fs = math.max(8, math.floor(SUIStyle.FS_BODY * scale))
+
     local color_key = _label_fg and tostring(_label_fg) or "default"
-    local key = text .. "|" .. w .. "|" .. scale_pct .. "|" .. color_key
+    local key = text .. "|" .. w .. "|" .. color_key .. "|" .. tostring(scale)
     if not _label_cache[key] then
         _label_cache[key] = FrameContainer:new{
             bordersize = 0, padding = 0,
             padding_left = PAD, padding_right = PAD,
             padding_bottom = UI.LABEL_PAD_BOT,
             UI.makeColoredText{
-                text    = text,
-                face    = Font:getFace("smallinfofont", fs),
+                    text    = text,
+                face    = Font:getFace(SUIStyle.FACE_REGULAR, fs),
                 bold    = true,
-                fgcolor = _label_fg,   -- nil → KOReader default (black)
+                fgcolor = _label_fg,    -- nil → KOReader default (black)
                 width   = w - PAD * 2,
-                height  = label_h,
             },
         }
     end
@@ -383,19 +401,19 @@ local function buildEmptyState(w, h)
         VerticalGroup:new{
             align = "center",
             CenterContainer:new{
-                dimen = Geom:new{ w = w, h = _EMPTY_TITLE_H },
+                dimen = Geom:new{ w = w },
                 TextWidget:new{
                     text = _("No books opened yet"),
-                    face = Font:getFace("smallinfofont", _EMPTY_TITLE_FS),
+                    face = _face_empty_title,  -- smallinfofont: 22pt
                     bold = true,
                 },
             },
             VerticalSpan:new{ width = _EMPTY_GAP },
             CenterContainer:new{
-                dimen = Geom:new{ w = w, h = _EMPTY_SUB_H },
+                dimen = Geom:new{ w = w },
                 UI.makeColoredText{
                     text    = _("Open a book to get started"),
-                    face    = Font:getFace("smallinfofont", _EMPTY_SUB_FS),
+                    face    = _face_empty_sub,  -- x_smallinfofont: 20pt
                     fgcolor = _getTextMid(),
                 },
             },
@@ -1478,19 +1496,19 @@ function HomescreenWidget:_buildCtx()
                 scale         = Config.getModuleScale("coverdeck", PFX),
                 thumb_scale   = Config.getThumbScale("coverdeck", PFX),
                 lbl_scale     = Config.getItemLabelScale("coverdeck", PFX),
-                source        = SUISettings:readSetting(PFX .. "flow_recent_source") or "recent",
+                source        = SUISettings:readSetting(PFX .. "coverdeck_source") or "recent",
                 title_pos     = SUISettings:readSetting(PFX .. "coverdeck_title_pos") or "below",
                 show_finished = SUISettings:readSetting(PFX .. "coverdeck_show_finished") == true,
                 show = {
-                    title    = SUISettings:nilOrTrue(PFX .. "flow_show_title"),
-                    author   = SUISettings:nilOrTrue(PFX .. "flow_show_author"),
-                    progress = SUISettings:nilOrTrue(PFX .. "flow_show_progress"),
-                    percent  = SUISettings:nilOrTrue(PFX .. "flow_show_percent"),
-                    days     = SUISettings:nilOrTrue(PFX .. "flow_show_book_days"),
-                    time     = SUISettings:nilOrTrue(PFX .. "flow_show_book_time"),
-                    remain   = SUISettings:nilOrTrue(PFX .. "flow_show_book_remaining"),
+                    title    = SUISettings:nilOrTrue(PFX .. "coverdeck_show_title"),
+                    author   = SUISettings:nilOrTrue(PFX .. "coverdeck_show_author"),
+                    progress = SUISettings:nilOrTrue(PFX .. "coverdeck_show_progress"),
+                    percent  = SUISettings:nilOrTrue(PFX .. "coverdeck_show_percent"),
+                    book_days      = SUISettings:nilOrTrue(PFX .. "coverdeck_show_book_days"),
+                    book_time      = SUISettings:nilOrTrue(PFX .. "coverdeck_show_book_time"),
+                    book_remaining = SUISettings:nilOrTrue(PFX .. "coverdeck_show_book_remaining"),
                 },
-                elem_order    = SUISettings:readSetting(PFX .. "coverdeck_elem_order"),
+                elem_order    = SUISettings:readSetting(PFX .. "coverdeck_stats_order"),
             },
         }
         self._cfg_cache = cfg
@@ -1557,16 +1575,18 @@ function HomescreenWidget:_buildCtx()
         (cd_cfg and cd_cfg.show and
             (cd_cfg.show.book_days or cd_cfg.show.book_time or cd_cfg.show.book_remaining))
         or (not (cd_cfg and cd_cfg.show) and (
-            SUISettings:nilOrTrue(PFX .. "flow_show_book_days") or
-            SUISettings:nilOrTrue(PFX .. "flow_show_book_time") or
-            SUISettings:nilOrTrue(PFX .. "flow_show_book_remaining"))))
+            SUISettings:nilOrTrue(PFX .. "coverdeck_show_book_days") or
+            SUISettings:nilOrTrue(PFX .. "coverdeck_show_book_time") or
+            SUISettings:nilOrTrue(PFX .. "coverdeck_show_book_remaining"))))
 
     -- "currently" always needs the DB when active (all its stats are DB-backed).
     -- The "recent" module (mod_r) shows no DB-backed stats, so it is excluded.
     local wants_db = show_c or coverdeck_needs_db or wants_stats or ext_needs_db
 
     if wants_db and not self._db_conn and not self._db_sync_guard then
-        self._db_conn = Config.openStatsDB()
+        if not self._defer_stats then
+            self._db_conn = Config.openStatsDB()
+        end
     end
 
     -- Pre-fetch numeric stats via the shared provider (at most 2 DB roundtrips).
@@ -1588,8 +1608,12 @@ function HomescreenWidget:_buildCtx()
     if wants_stats then
         local SP = _getStatsProvider()
         if SP then
-            local year_str = os.date("%Y")
-            stats_data = SP.get(self._db_conn, year_str, needs_books)
+            if self._defer_stats then
+                stats_data = SP.getStale() or {}
+            else
+                local year_str = os.date("%Y")
+                stats_data = SP.get(self._db_conn, year_str, needs_books)
+            end
             if stats_data and stats_data.db_conn_fatal then
                 logger.warn("simpleui: homescreen: StatsProvider reported fatal DB error — dropping connection")
                 if self._db_conn then
@@ -1615,7 +1639,7 @@ function HomescreenWidget:_buildCtx()
             if cd_mod and cd_mod.fetchBookStatsForCtx then
                 coverdeck_center_stats = {
                     fp    = center_fp,
-                    stats = cd_mod.fetchBookStatsForCtx(center_md5, self._db_conn),
+                    stats = cd_mod.fetchBookStatsForCtx(center_md5, self._db_conn, not self._defer_stats),
                 }
             end
         end
@@ -1643,7 +1667,7 @@ function HomescreenWidget:_buildCtx()
                 if mc_ok and mc_mod and mc_mod.fetchBookStatsForCtx then
                     currently_book_stats = {
                         fp    = bs.current_fp,
-                        stats = mc_mod.fetchBookStatsForCtx(c_md5, self._db_conn),
+                        stats = mc_mod.fetchBookStatsForCtx(c_md5, self._db_conn, not self._defer_stats),
                     }
                 end
             end
@@ -1652,6 +1676,7 @@ function HomescreenWidget:_buildCtx()
 
     local self_ref = self
     return {
+        _needs_books           = needs_books,
         pfx                    = PFX,
         pfx_qa                 = PFX_QA,
         close_fn               = function() self_ref:onClose() end,
@@ -1734,8 +1759,15 @@ function HomescreenWidget:_getHsCtxMenu()
     local c = setmetatable({
         pfx           = PFX,
         pfx_qa        = PFX_QA,
+        is_sui        = true,          -- signals that we are inside a SUIWindow
         refresh       = function()
-            if Homescreen._instance then Homescreen._instance:_refresh(false) end
+            if Homescreen._instance then
+                Homescreen._instance._enabled_mods_cache = nil
+                Homescreen._instance._ctx_cache          = nil
+                Homescreen._instance._cfg_cache          = nil
+                Homescreen._cfg_cache                    = nil
+                Homescreen._instance:_refresh(false)
+            end
         end,
         UIManager     = UIManager,
         _             = _,
@@ -1769,33 +1801,65 @@ function HomescreenWidget:_onHoldModRelease(wrapper)
     local mod = wrapper._sui_mod
     local hs  = wrapper._sui_hs
     if not mod or not hs then return true end
-    local Topbar   = require("sui_topbar")
-    local topbar_h = SUISettings:nilOrTrue("simpleui_topbar_enabled")
-                     and Topbar.TOTAL_TOP_H() or 0
-    local _lc = _
-    UI.showSettingsMenu(
-        mod.name or mod.id,
-        function()
+
+        local SUIWindow = require("sui_window")
+
+        local function buildRoot(ctx)
             local ctx_menu = hs:_getHsCtxMenu()
-            local items    = mod.getMenuItems(ctx_menu)
-            local gap_item = Config.makeGapItem({
-                text_func = function()
-                    local pct = Config.getModuleGapPct(mod.id, PFX)
-                    return string.format(_lc("Top Margin  (%d%%)"), pct)
+            local local_ctx_menu = setmetatable({
+                refresh           = function() ctx_menu.refresh(); ctx.repaint() end,
+                show_arrange      = function(params) ctx.push("arrange",      params) end,
+                show_item_picker  = function(params) ctx.push("item_picker",  params) end,
+            }, { __index = ctx_menu })
+
+            local items    = type(mod.getMenuItems) == "function" and mod.getMenuItems(local_ctx_menu) or {}
+            if not mod.no_top_margin then
+                local gap_item = Config.makeGapItem({
+                    text_func = function()
+                        return _("Top Margin")
+                    end,
+                    title   = mod.name or mod.id,
+                    info    = _("Vertical space above this module.\n100% is the default spacing."),
+                    get     = function() return Config.getModuleGapPct(mod.id, PFX) end,
+                    set     = function(v)
+                        Config.setModuleGap(v, mod.id, PFX)
+                        hs._enabled_mods_cache = nil
+                    end,
+                    refresh = ctx_menu.refresh,
+                })
+                items[#items + 1] = gap_item
+            end
+            return SUIWindow.MenuTable{
+                items          = items,
+                inner_w        = ctx.inner_w,
+                repaint        = function() ctx.repaint() end,
+                lock_overlay   = ctx.lockOverlay,
+                unlock_overlay = ctx.unlockOverlay,
+                push_stack     = function(id, params)
+                    if type(id) == "string" then ctx.push(id, params) else ctx.push("nested_menu", params) end
                 end,
-                title   = mod.name or mod.id,
-                info    = _lc("Vertical space above this module.\n100% is the default spacing."),
-                get     = function() return Config.getModuleGapPct(mod.id, PFX) end,
-                set     = function(v) Config.setModuleGap(v, mod.id, PFX) end,
-                refresh = ctx_menu.refresh,
-            })
-            items[#items + 1] = gap_item
-            return items
-        end,
-        topbar_h,
-        Screen:getHeight(),
-        Bottombar.TOTAL_H()
-    )
+                on_close       = function() end,
+            }
+        end
+
+        local function titleFn(ctx)
+            local cur = ctx.current()
+            local id  = cur and cur.id or "__root__"
+            if id == "nested_menu"  then return cur.params.title or "" end
+            if id == "arrange"      then return cur.params.title or _("Arrange Items") end
+            if id == "item_picker"  then return cur.params and cur.params.title or _("Add Item") end
+            return mod.name or mod.id
+        end
+
+        local win = SUIWindow:new{
+            name           = "sui_win_context",
+            title          = titleFn,
+            screens        = SUIWindow.makeSettingsScreens(buildRoot),
+            navpager_mode  = Config.isNavpagerEnabled(),
+            position       = "bottom",
+            has_settings_btn = true,
+        }
+        win:show()
     return true
 end
 
@@ -1875,11 +1939,30 @@ function HomescreenWidget:_updatePage(keep_cache, books_only, stats_only)
     local body    = self._body
     if not body then return end
 
-    -- Module list cache — rebuilt whenever module_order changes.
+    -- Module list cache — rebuilt whenever layout changes.
+    local layout = SUISettings:readSetting("simpleui_layout")
     local raw_order = Registry.loadOrder(PFX)
+    
+    local layout_fingerprint = ""
+    local pages_by_id = {}
+    
+    if layout and type(layout.pages) == "table" then
+        for _, page in ipairs(layout.pages) do
+            local page_ids = {}
+            for _, mod_id in ipairs(page.modules) do
+                table.insert(page_ids, mod_id)
+                layout_fingerprint = layout_fingerprint .. mod_id .. ","
+            end
+            layout_fingerprint = layout_fingerprint .. "|"
+            table.insert(pages_by_id, page_ids)
+        end
+    else
+        pages_by_id = splitOrderIntoPages(raw_order)
+        layout_fingerprint = table.concat(raw_order, ",")
+    end
+
     if not self._enabled_mods_cache
-       or self._enabled_mods_cache.raw_order ~= raw_order then
-        local pages_by_id   = splitOrderIntoPages(raw_order)
+       or self._enabled_mods_cache.layout_fingerprint ~= layout_fingerprint then
         local has_book_mod  = false
         local mod_gaps      = {}
         local pages_of_mods = {}
@@ -1901,6 +1984,9 @@ function HomescreenWidget:_updatePage(keep_cache, books_only, stats_only)
         if #pages_of_mods == 0 then pages_of_mods[1] = {} end
 
         local chosen_pages = SUISettings:readSetting(PFX .. "homescreen_num_pages")
+        if layout and type(layout.pages) == "table" then
+            chosen_pages = #layout.pages
+        end
         if chosen_pages and chosen_pages > #pages_of_mods then
             for _ = #pages_of_mods + 1, chosen_pages do
                 pages_of_mods[#pages_of_mods + 1] = {}
@@ -1944,7 +2030,7 @@ function HomescreenWidget:_updatePage(keep_cache, books_only, stats_only)
             has_book_mod  = has_book_mod,
             total_pages   = #pages_of_mods,
             pages_of_mods = pages_of_mods,
-            raw_order     = raw_order,
+            layout_fingerprint = layout_fingerprint,
         }
     end
     local enabled_mods  = self._enabled_mods_cache.mods
@@ -1979,6 +2065,8 @@ function HomescreenWidget:_updatePage(keep_cache, books_only, stats_only)
     self._header_is_wrapped = false
     self._clock_body_idx    = nil
     self._clock_body_ref    = body
+    self._stats_mod_slots   = {}
+    self._book_mod_slots    = {}
     self._cover_mod_slots   = {}
     self._clock_is_wrapped  = false
 
@@ -2119,6 +2207,18 @@ function HomescreenWidget:_updatePage(keep_cache, books_only, stats_only)
                         widget = widget,  -- raw widget with _cover_slots attached
                     }
                 end
+                if mod.is_book_mod then
+                    self._book_mod_slots[mod.id] = {
+                        mod = mod,
+                        parent = col_body,
+                        index = #col_body + 1,
+                        col_w = col_w,
+                        has_menu = has_menu
+                    }
+                end
+                if type(mod.updateStats) == "function" then
+                    self._stats_mod_slots[mod.id] = { mod = mod, widget = widget }
+                end
             end
             return col_body
         end
@@ -2224,6 +2324,18 @@ function HomescreenWidget:_updatePage(keep_cache, books_only, stats_only)
                         mod    = mod,
                         widget = widget,
                     }
+                end
+                if mod.is_book_mod then
+                    self._book_mod_slots[mod.id] = {
+                        mod = mod,
+                        parent = body,
+                        index = #body + 1,
+                        col_w = inner_w,
+                        has_menu = has_menu
+                    }
+                end
+                if type(mod.updateStats) == "function" then
+                    self._stats_mod_slots[mod.id] = { mod = mod, widget = widget }
                 end
             end
         end
@@ -2336,34 +2448,169 @@ end
 -- _refresh — debounced rebuild. Page turns call _updatePage directly.
 -- ---------------------------------------------------------------------------
 function HomescreenWidget:_refresh(keep_cache, books_only, stats_only)
+    local defer_async = false
+    if not keep_cache and self._body and self._ctx_cache then
+        defer_async = true
+        keep_cache  = true
+    end
+
     if keep_cache and self._body then
         self:_updatePage(true)
         UIManager:setDirty(self, "ui")
+
+        if defer_async then
+            if self._refresh_scheduled then return end
+            self._refresh_scheduled = true
+            local token = {}
+            self._pending_refresh_token = token
+
+            UIManager:scheduleIn(0.05, function()
+                if self._pending_refresh_token ~= token then return end
+                if Homescreen._instance ~= self then return end
+                self._refresh_scheduled = false
+
+                -- Abre ligação à BD se necessário
+                if not self._db_conn and not self._db_sync_guard then
+                    self._db_conn = Config.openStatsDB()
+                end
+
+                if self._ctx_cache then
+                    -- 1. Obter novos metadados de livros (prefetchBooks)
+                    if not stats_only then
+                        local SH = _getBookShared()
+                        if SH then
+                            local mod_r  = Registry.get("recent")
+                            local mod_cd = Registry.get("coverdeck")
+                            local show_c = Registry.isEnabled(Registry.get("currently"), PFX)
+                            local show_r = (mod_r and Registry.isEnabled(mod_r, PFX)) or (mod_cd and Registry.isEnabled(mod_cd, PFX))
+                            local show_finished = false
+                            if mod_r and Registry.isEnabled(mod_r, PFX) then
+                                show_finished = SUISettings:readSetting(PFX .. "recent_show_finished") == true
+                            elseif mod_cd and Registry.isEnabled(mod_cd, PFX) then
+                                show_finished = SUISettings:readSetting(PFX .. "coverdeck_show_finished") == true
+                            end
+                            local new_bs = SH.prefetchBooks(show_c, show_r, 5, show_finished)
+                            self._cached_books_state = new_bs
+                            self._ctx_cache.prefetched = new_bs.prefetched_data
+                            self._ctx_cache.current_fp = new_bs.current_fp
+                            self._ctx_cache.recent_fps = new_bs.recent_fps
+                        end
+                    end
+
+                    -- 2. Obter novas estatísticas globais
+                    local SP = _getStatsProvider()
+                    if SP then
+                        local new_stats = SP.get(self._db_conn, os.date("%Y"), self._ctx_cache._needs_books)
+                        if new_stats then self._ctx_cache.stats = new_stats end
+                    end
+
+                    local MC = package.loaded["desktop_modules/module_currently"]
+                    if MC and MC.fetchBookStatsForCtx and self._ctx_cache.current_fp then
+                        local pe = self._ctx_cache.prefetched and self._ctx_cache.prefetched[self._ctx_cache.current_fp]
+                        local md5 = pe and pe.partial_md5_checksum
+                        if md5 then
+                            self._ctx_cache.currently_book_stats = {
+                                fp = self._ctx_cache.current_fp,
+                                stats = MC.fetchBookStatsForCtx(md5, self._db_conn, true)
+                            }
+                        end
+                    end
+
+                    local MCD = package.loaded["desktop_modules/module_coverdeck"]
+                    if MCD and MCD.fetchBookStatsForCtx and self._ctx_cache.recent_fps then
+                        local saved_center_fp = SUISettings:readSetting(PFX .. "flow_recent_fp")
+                        local center_fp = saved_center_fp or self._ctx_cache.recent_fps[1]
+                        local pe = center_fp and self._ctx_cache.prefetched and self._ctx_cache.prefetched[center_fp]
+                        local md5 = pe and pe.partial_md5_checksum
+                        if md5 then
+                            self._ctx_cache.coverdeck_center_stats = {
+                                fp = center_fp,
+                                stats = MCD.fetchBookStatsForCtx(md5, self._db_conn, true)
+                            }
+                        end
+                    end
+
+                    -- 3. Atualizar Módulos de Livros
+                    -- Fix 3: tentar updateStats in-place primeiro (O(1), zero alloc).
+                    -- Só reconstrói o widget completo se o módulo não tiver updateStats
+                    -- (fallback para módulos que não suportam update in-place).
+                    if not stats_only then
+                        for id, slot in pairs(self._book_mod_slots or {}) do
+                            local updated_in_place = false
+                            if type(slot.mod.updateStats) == "function" then
+                                local ok, result = pcall(slot.mod.updateStats, slot.widget, self._ctx_cache)
+                                updated_in_place = ok and result
+                            end
+
+                            if updated_in_place then
+                                -- In-place update bem-sucedido: setDirty só na região do widget.
+                                local w = slot.widget
+                                if w and w.dimen then
+                                    UIManager:setDirty(self, function() return "ui", w.dimen end)
+                                else
+                                    UIManager:setDirty(self, "ui")
+                                end
+                            else
+                                -- Fallback: rebuild completo (módulo sem updateStats ou erro).
+                                local new_widget = slot.mod.build(slot.col_w, self._ctx_cache)
+                                if new_widget then
+                                    if slot.has_menu then
+                                        local wrapper = self._wrapper_pool[id]
+                                        if wrapper then
+                                            wrapper[1] = new_widget
+                                            UIManager:setDirty(self, function() return "ui", wrapper.dimen, true end)
+                                        end
+                                    else
+                                        slot.parent[slot.index] = new_widget
+                                        UIManager:setDirty(self, function() return "ui", new_widget.dimen, true end)
+                                    end
+                                end
+                            end
+                        end
+                    end
+
+                    -- 4. Atualizar Módulos de Estatísticas
+                    -- Cada slot usa setDirty direcionado para a sua própria dimen,
+                    -- evitando um repaint global do ecrã inteiro (Fix: double-repaint E-ink).
+                    -- updateStats() returns false when _changed flags show none of the
+                    -- module's fields were re-fetched — skip setDirty entirely in that case.
+                    for _, slot in pairs(self._stats_mod_slots or {}) do
+                        local updated = slot.mod.updateStats(slot.widget, self._ctx_cache)
+                        if updated then
+                            -- Repintura cirúrgica: só a região do módulo de estatísticas.
+                            -- slot.widget.dimen pode ser nil se o widget ainda não foi
+                            -- posicionado; nesse caso cai para o repaint global como fallback.
+                            if slot.widget and slot.widget.dimen then
+                                UIManager:setDirty(self, function()
+                                    return "ui", slot.widget.dimen
+                                end)
+                            else
+                                UIManager:setDirty(self, "ui")
+                            end
+                        end
+                    end
+                end
+            end)
+        end
         return
     end
-    if stats_only then
-        self._ctx_cache = nil
-    else
-        self._cached_books_state = nil
-        if not books_only then
-            self._enabled_mods_cache = nil
-            self._ctx_cache          = nil
-            self._cfg_cache          = nil
-            Homescreen._cfg_cache    = nil
-        end
-    end
+
+    self._cached_books_state = nil
+    self._enabled_mods_cache = nil
+    self._ctx_cache          = nil
+    self._cfg_cache          = nil
+    Homescreen._cfg_cache    = nil
+
     if self._refresh_scheduled then return end
     self._refresh_scheduled = true
     local token = {}
     self._pending_refresh_token = token
-    local _books_only = books_only
-    local _stats_only = stats_only
     UIManager:scheduleIn(0, function()
         if self._pending_refresh_token ~= token then return end
         if Homescreen._instance ~= self then return end
         self._refresh_scheduled = false
         if not self._navbar_container then return end
-        self:_updatePage(false, _books_only, _stats_only)
+        self:_updatePage(false)
         UIManager:setDirty(self, "ui")
     end)
 end
@@ -2505,11 +2752,11 @@ end
 -- Lifecycle
 -- ---------------------------------------------------------------------------
 function HomescreenWidget:onShow()
+    local need_async = false
     if self._stats_need_refresh or Homescreen._stats_need_refresh then
         self._stats_need_refresh       = nil
         Homescreen._stats_need_refresh = nil
-        local SP = package.loaded["desktop_modules/module_stats_provider"]
-        if SP then SP.invalidate() end
+        need_async = true
     end
     if self._navbar_container then
         local overlap = self:_initLayout()
@@ -2518,11 +2765,21 @@ function HomescreenWidget:onShow()
             overlap.overlap_offset = old.overlap_offset
         end
         self._navbar_container[1] = overlap
+        
+        if need_async then
+            self._defer_stats = true
+        end
+        
         self:_updatePage(true)
         UIManager:setDirty(self, "ui")
         local ClockMod = Registry.get("clock")
         if ClockMod and Registry.isEnabled(ClockMod, PFX) and ClockMod.scheduleRefresh then
             ClockMod.scheduleRefresh(self)
+        end
+        
+        if need_async then
+            self._defer_stats = false
+            self:_refresh(false)
         end
     end
 end
@@ -2620,6 +2877,20 @@ end
 
 function HomescreenWidget:onResume()
     self._suspended = false
+    -- Invalidate the time-series portion of the stats cache so that any reading
+    -- done before the suspend (or while the device was awake in the reader) is
+    -- reflected immediately on wakeup.  We use invalidateTimeSeries rather than
+    -- invalidate so that the expensive sidecar-scan (books_year/books_total) is
+    -- preserved when the book's completion status has not changed — matching the
+    -- same optimisation applied in onCloseDocument.
+    -- stats_only=true keeps _cached_books_state intact (no sidecar I/O needed).
+    local SP = package.loaded["desktop_modules/module_stats_provider"]
+    if SP and SP.invalidateTimeSeries then
+        SP.invalidateTimeSeries()
+    elseif SP and SP.invalidate then
+        SP.invalidate()
+    end
+    self:_refresh(false, false, true)
     local ClockMod = Registry.get("clock")
     if ClockMod and Registry.isEnabled(ClockMod, PFX) and ClockMod.scheduleRefresh then
         ClockMod.scheduleRefresh(self)
@@ -2760,6 +3031,8 @@ end
 -- ---------------------------------------------------------------------------
 
 function Homescreen.show(on_qa_tap, on_goal_tap)
+    local onboarding_pending = not SUISettings:get("simpleui_onboarding_done")
+
     if Homescreen._instance then
         UIManager:close(Homescreen._instance)
         Homescreen._instance = nil
@@ -2773,6 +3046,17 @@ function Homescreen.show(on_qa_tap, on_goal_tap)
     }
     Homescreen._instance = w
     UIManager:show(w)
+
+    if onboarding_pending then
+        local ok, Onboarding = pcall(require, "sui_onboarding")
+        if ok and Onboarding then
+            Onboarding.show(function()
+                Homescreen.rebuildLayout()
+            end)
+        else
+            SUISettings:set("simpleui_onboarding_done", true)
+        end
+    end
 end
 
 function Homescreen.refresh(keep_cache, books_only, stats_only)
@@ -2888,15 +3172,20 @@ end
 function Homescreen.styleScanWallpapers()
     local dir     = _styleWallpapersDir()
     local items   = {}
-    local exts    = { jpg=true, jpeg=true, png=true, bmp=true, gif=true }
+    local exts    = { jpg=true, jpeg=true, png=true, bmp=true, gif=true, webp=true }
     if lfs.attributes(dir, "mode") == "directory" then
         for fname in lfs.dir(dir) do
-            local ext = fname:match("%.([^%.]+)$")
-            if ext and exts[ext:lower()] then
-                items[#items + 1] = {
-                    label = fname:match("^(.+)%.[^%.]+$") or fname,
-                    path  = dir .. "/" .. fname,
-                }
+            -- lfs.dir() always yields "." and ".." — skip them explicitly so
+            -- they are never matched against the extension table (a bare "."
+            -- has no extension, but guard unconditionally for clarity).
+            if fname ~= "." and fname ~= ".." then
+                local ext = fname:match("%.([^%.]+)$")
+                if ext and exts[ext:lower()] then
+                    items[#items + 1] = {
+                        label = fname:match("^(.+)%.[^%.]+$") or fname,
+                        path  = dir .. "/" .. fname,
+                    }
+                end
             end
         end
         table.sort(items, function(a, b) return a.label:lower() < b.label:lower() end)

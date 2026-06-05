@@ -25,10 +25,12 @@ local Screen          = Device.screen
 local logger          = require("logger")
 local lfs             = require("libs/libkoreader-lfs")
 local _ = require("sui_i18n").translate
+local N_ = require("sui_i18n").ngettext
 local Config          = require("sui_config")
 
 local UI           = require("sui_core")
-local SUISettings = require("sui_store")
+local SUISettings  = require("sui_store")
+local SUIStyle     = require("sui_style")
 local CLR_TEXT_SUB = UI.CLR_TEXT_SUB
 local PAD     = UI.PAD
 local PAD2    = UI.PAD2
@@ -45,11 +47,11 @@ local _BASE_BADGE_MARGIN   = Screen:scaleBySize(4)  -- right margin
 local _BASE_BADGE_MARGIN_T = Screen:scaleBySize(8)  -- top margin
 local _BASE_EDGE_THICK   = Screen:scaleBySize(3)
 local _BASE_EDGE_MARGIN  = Screen:scaleBySize(1)
-local _BASE_PH_COVER_FS  = Screen:scaleBySize(12)  -- placeholder initials font
-local _BASE_COLL_LBL_FS  = Screen:scaleBySize(8)   -- collection name label font
-local _BASE_BADGE_FS     = Screen:scaleBySize(6)    -- badge font (~0.375 x badge_sz)
+local _BASE_PH_COVER_FS  = SUIStyle.FS_TITLE    -- 22: placeholder initials font
+local _BASE_COLL_LBL_FS  = SUIStyle.FS_DETAIL   -- 15: collection name label font
+local _BASE_BADGE_FS     = 8   -- badge font (~0.375 x badge_sz) — proportional overlay, bypasses type scale
 local _BASE_EMPTY_H      = Screen:scaleBySize(36)
-local _BASE_EMPTY_FS     = Screen:scaleBySize(10)
+local _BASE_EMPTY_FS     = SUIStyle.FS_BODY     -- 18: empty state
 
 local EDGE_COLOR = Blitbuffer.gray(0.70)
 local EDGE_H1    = 0.97   -- inner line height fraction of COLL_H
@@ -113,11 +115,11 @@ end
 -- ---------------------------------------------------------------------------
 -- Settings keys
 -- ---------------------------------------------------------------------------
-local SETTINGS_KEY       = "simpleui_collections_list"
-local COVER_OVERRIDE_KEY = "simpleui_collections_covers"
-local BADGE_POSITION_KEY = "simpleui_collections_badge_position"
-local BADGE_COLOR_KEY    = "simpleui_collections_badge_color"
-local BADGE_HIDDEN_KEY   = "simpleui_collections_badge_hidden"
+local SETTINGS_KEY       = "simpleui_coll_list"
+local COVER_OVERRIDE_KEY = "simpleui_coll_covers"
+local BADGE_POSITION_KEY = "simpleui_coll_badge_position"
+local BADGE_COLOR_KEY    = "simpleui_coll_badge_color"
+local BADGE_HIDDEN_KEY   = "simpleui_coll_badge_hidden"
 
 local function getBadgePosition()
     return SUISettings:readSetting(BADGE_POSITION_KEY) or "top"
@@ -205,7 +207,7 @@ local function buildCoverCell(files, cover_override, coll_name, count, d, accent
         local raw = getBookCover(front_fp, d.coll_w, d.coll_h)
         if raw then
             cover = FrameContainer:new{
-                bordersize = 1, color = _CLR_COVER_BORDER,
+                bordersize = SUIStyle.BADGE_BORDER_SZ, color = _CLR_COVER_BORDER,
                 padding    = 0, margin = 0,
                 dimen      = Geom:new{ w = d.coll_w, h = d.coll_h },
                 raw,
@@ -214,14 +216,14 @@ local function buildCoverCell(files, cover_override, coll_name, count, d, accent
     end
     if not cover then
         cover = FrameContainer:new{
-            bordersize = 1, color = _CLR_COVER_BORDER,
+            bordersize = SUIStyle.BADGE_BORDER_SZ, color = _CLR_COVER_BORDER,
             background = _CLR_COVER_BG, padding = 0,
             dimen      = Geom:new{ w = d.coll_w, h = d.coll_h },
             CenterContainer:new{
                 dimen = Geom:new{ w = d.coll_w, h = d.coll_h },
                 TextWidget:new{
                     text = (coll_name or "?"):sub(1, 2):upper(),
-                    face = Font:getFace("smallinfofont", d.ph_cover_fs),
+                    face = Font:getFace(SUIStyle.FACE_REGULAR, d.ph_cover_fs),
                 },
             },
         }
@@ -275,7 +277,7 @@ local function buildCoverCell(files, cover_override, coll_name, count, d, accent
 
     local badge_tw = UI.makeColoredText{
         text    = tostring(math.min(count, 99)),
-        face    = Font:getFace("cfont", d.badge_fs),
+        face    = Font:getFace(SUIStyle.FACE_REGULAR, d.badge_fs),
         fgcolor = fg_color,
         bold    = true,
     }
@@ -289,8 +291,8 @@ local function buildCoverCell(files, cover_override, coll_name, count, d, accent
         badge_tw,
     }
     local badge = FrameContainer:new{
-        bordersize = Size.border.thin,
-        color      = Blitbuffer.COLOR_GRAY,
+        bordersize = SUIStyle.BADGE_BORDER_SZ,
+        color      = SUIStyle.BADGE_BORDER_CLR,
         background = bg_color,
         radius     = math.floor(d.badge_sz / 2),
         padding    = 0,
@@ -335,12 +337,12 @@ local M = {}
 M.id          = "collections"
 M.name        = _("Collections")
 M.label       = _("Collections")
-M.enabled_key = "collections"
+M.enabled_key = "collections_enabled"
 M.default_on  = false
 M.has_covers  = true   -- activates e-ink dithering and cover poll
 
 function M.setEnabled(pfx, on)
-    SUISettings:saveSetting(pfx .. "collections", on)
+    SUISettings:saveSetting(pfx .. "collections_enabled", on)
 end
 
 local MAX_COLL = 5
@@ -349,8 +351,8 @@ function M.getCountLabel(_pfx)
     local n   = #M.getSelected()
     local rem = MAX_COLL - n
     if n == 0   then return nil end
-    if rem <= 0 then return string.format("(%d/%d — at limit)", n, MAX_COLL) end
-    return string.format("(%d/%d — %d left)", n, MAX_COLL, rem)
+    if rem <= 0 then return string.format(_("(%d/%d — at limit)"), n, MAX_COLL) end
+    return string.format(N_("(%d/%d — %d left)", "(%d/%d — %d left)", rem), n, MAX_COLL, rem)
 end
 
 function M.build(w, ctx)
@@ -424,11 +426,14 @@ function M.build(w, ctx)
     end
 
     if #selected == 0 then
+        local hold_on = SUISettings:nilOrTrue("simpleui_hs_settings_on_hold")
+        local ph_text = hold_on and _("No collections selected  —  long press to configure")
+                                 or _("No collections selected")
         return CenterContainer:new{
             dimen = Geom:new{ w = w, h = d.empty_h },
             UI.makeColoredText{
-                text    = _("No collections selected"),
-                face    = Font:getFace("cfont", d.empty_fs),
+                text    = ph_text,
+                face    = Font:getFace(SUIStyle.FACE_REGULAR, d.empty_fs),
                 fgcolor = CLR_TEXT_SUB_EFF,
                 width   = w - PAD * 2,
             },
@@ -490,7 +495,7 @@ function M.build(w, ctx)
    
         local label_args = {
             text      = display_name,
-            face      = Font:getFace("smallinfofont", d.coll_lbl_fs),
+            face      = Font:getFace(SUIStyle.FACE_REGULAR, d.coll_lbl_fs),
             bold      = true,
             fgcolor   = CLR_TEXT_SUB_EFF,
             width     = d.coll_w,
@@ -545,7 +550,7 @@ function M.build(w, ctx)
     local show_frame = SUISettings:isTrue(ctx.pfx .. "collections_show_frame")
     local solid_bg   = SUISettings:isTrue(ctx.pfx .. "collections_solid_bg")
     local has_box    = show_frame or solid_bg
-    local border_sz  = show_frame and 1 or 0
+    local border_sz  = show_frame and SUIStyle.BORDER_SZ or 0
     local radius     = has_box and math.floor(Screen:scaleBySize(12) * scale) or 0
     local border_color = Blitbuffer.gray(0.72)
     local bg_color   = nil
@@ -585,7 +590,7 @@ function M.updateCovers(widget, _ctx)
             end)
             if ok and img then
                 slot.container[slot.idx] = FrameContainer:new{
-                    bordersize = 1, color = _CLR_COVER_BORDER,
+                    bordersize = SUIStyle.BADGE_BORDER_SZ, color = _CLR_COVER_BORDER,
                     padding    = 0, margin = 0,
                     dimen      = Geom:new{ w = slot.w, h = slot.h },
                     img,
@@ -761,9 +766,8 @@ function M.getMenuItems(ctx_menu)
     end
 
     local items = {}
-    items[#items + 1] = Config.makeLabelToggleItem("collections", _("Collections"), refresh, _lc)
     items[#items + 1] = {
-        text = _lc("Arrange Collections"), keep_menu_open = true,
+        text = _lc("Collections"), keep_menu_open = true,
         callback = function()
             local cur_sel = M.getSelected()
             if #cur_sel < 2 then
@@ -775,31 +779,118 @@ function M.getMenuItems(ctx_menu)
             for _loop_, n in ipairs(cur_sel) do
                 sort_items[#sort_items + 1] = { text = n, orig_item = n }
             end
+            local function on_save()
+                local new_order = {}
+                for _loop_, item in ipairs(sort_items) do
+                    new_order[#new_order + 1] = item.orig_item
+                end
+                M.saveSelected(new_order); refresh()
+            end
             _UIManager:show(SortWidget:new{
-                title             = _lc("Arrange Collections"),
+                title             = _lc("Collections"),
                 item_table        = sort_items,
                 covers_fullscreen = true,
-                callback          = function()
-                    local new_order = {}
-                    for _loop_, item in ipairs(sort_items) do
-                        new_order[#new_order + 1] = item.orig_item
-                    end
-                    M.saveSelected(new_order); refresh()
-                end,
+                callback          = on_save,
             })
         end,
+        sui_build = ctx_menu.is_sui and function(ctx, _item)
+            local SUIWindow = require("sui_window")
+            return SUIWindow.ListRow{
+                title        = _lc("Collections"),
+                    subtitle     = function()
+                        local cur_sel = M.getSelected()
+                        if #cur_sel == 0 then return _lc("No items selected.") end
+                        local names = {}
+                        local TBR = package.loaded["desktop_modules/module_tbr"]
+                        for _, n in ipairs(cur_sel) do
+                            names[#names + 1] = (TBR and n == TBR.TBR_COLL_NAME) and TBR.getDisplayName() or n
+                        end
+                        return table.concat(names, "  ·  ")
+                    end,
+                inner_w      = ctx.inner_w,
+                    item_count   = function() return #M.getSelected() end,
+                    max_items    = MAX_COLL,
+                show_chevron = true,
+                on_tap       = function()
+                    local cur_sel = M.getSelected()
+                    local sort_items = {}
+                    for _, n in ipairs(cur_sel) do
+                        local _display_n = n
+                        local TBR = package.loaded["desktop_modules/module_tbr"]
+                        if TBR and n == TBR.TBR_COLL_NAME then _display_n = TBR.getDisplayName() end
+                        sort_items[#sort_items + 1] = { text = _display_n, orig_item = n }
+                    end
+                    
+                    ctx.push("arrange", {
+                        title = _lc("Collections"),
+                        items = sort_items,
+                        empty_text = _lc("No items selected."),
+                            item_count = function() return #M.getSelected() end,
+                            max_items  = MAX_COLL,
+                        on_delete = function(item) end,
+                        on_change = function(items_to_save)
+                            local new_order = {}
+                            for _, it in ipairs(items_to_save) do new_order[#new_order + 1] = it.orig_item end
+                            M.saveSelected(new_order)
+                            refresh()
+                        end,
+                        footer_text = _lc("Add Collection"),
+                        footer_action = function(ctx2)
+                            local cur = M.getSelected()
+                            local picker_items = {}
+                            for _, _n in ipairs(all_colls) do
+                                local is_sel = false
+                                for _, s in ipairs(cur) do if s == _n then is_sel = true break end end
+                                if not is_sel then
+                                    local _display_n = _n
+                                    local TBR = package.loaded["desktop_modules/module_tbr"]
+                                    if TBR and _n == TBR.TBR_COLL_NAME then _display_n = TBR.getDisplayName() end
+                                    picker_items[#picker_items + 1] = {
+                                        text   = _display_n,
+                                        on_tap = function(picker_ctx)
+                                            local new_sel = M.getSelected()
+                                            if #new_sel >= MAX_COLL then
+                                                local InfoMessage = ctx_menu.InfoMessage or require("ui/widget/infomessage")
+                                                local uim = ctx_menu.UIManager or require("ui/uimanager")
+                                                uim:show(InfoMessage:new{
+                                                    text = _lc("Maximum 5 collections. Remove one first."), timeout = 2,
+                                                })
+                                                return
+                                            end
+                                            new_sel[#new_sel + 1] = _n
+                                            M.saveSelected(new_sel)
+                                            table.insert(sort_items, { text = _display_n, orig_item = _n })
+                                            refresh()
+                                            picker_ctx.pop()
+                                            ctx2.repaint()
+                                        end,
+                                    }
+                                end
+                            end
+                            ctx2.push("item_picker", {
+                                title = _lc("Add Collection"),
+                                items = picker_items,
+                            })
+                        end
+                    })
+                end
+            }
+        end or nil,
     }
+
     items[#items + 1] = _makeScaleItem(ctx_menu)
     items[#items + 1] = _makeItemLabelScaleItem(ctx_menu)
     items[#items + 1] = Config.makeScaleItem({
-        text_func = function() return ctx_menu._("Cover size") end,
+        text_func = function() return ctx_menu._("Cover Size") end,
         separator = true,
-        title     = ctx_menu._("Cover size"),
+        title     = ctx_menu._("Cover Size"),
         info      = ctx_menu._("Scale for the collection thumbnails only.\nThe label text follows the module scale.\n100% is the default size."),
         get       = function() return Config.getThumbScalePct("collections", ctx_menu.pfx) end,
         set       = function(v) Config.setThumbScale(v, "collections", ctx_menu.pfx) end,
         refresh   = ctx_menu.refresh,
     })
+
+    items[#items + 1] = Config.makeLabelToggleItem("collections", _("Collections"), refresh, _lc)
     items[#items + 1] = {
         text           = _lc("Frame"),
         checked_func   = function() return SUISettings:isTrue(ctx_menu.pfx .. "collections_show_frame") end,
@@ -910,6 +1001,7 @@ function M.getMenuItems(ctx_menu)
                     M.saveSelected(new_sel); refresh()
                 end,
                 hold_callback = function() openCoverPicker(_n) end,
+                sui_hidden = ctx_menu.is_sui or nil,
             }
         end
     end

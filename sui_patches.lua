@@ -43,12 +43,14 @@ local _hs_boot_done = false
 -- Set when ReaderUI closes with "Start with Homescreen" active.
 -- Makes UIManager.show defer the FM paint until the homescreen is on top,
 -- eliminating the visible flash between reader and homescreen.
-local _hs_pending_after_reader = false
-local _hs_pending_prev_action   = nil   -- real previous tab before active_action was set to "homescreen"
+local _hs_pending_after_reader = false  -- kept for reset in teardown only
 
 -- Cached value of the "start_with" setting. Updated whenever the user changes
 -- the setting so UIManager.show / close avoid repeated settings reads.
-local _start_with_hs = G_reader_settings:readSetting("start_with", "filemanager") == "homescreen_simpleui"
+-- Initialised lazily (nil until first read via isStartWithHS) so that
+-- applyFirstRunDefaults() in main.lua:init() has a chance to write
+-- "start_with" before we latch it for the boot session.
+local _start_with_hs = nil
 
 -- Navbar keyboard-focus state (D-pad devices only).
 -- _navbar_kb_capture: the transparent InputContainer on the UIManager stack,
@@ -68,11 +70,69 @@ local _enterNavbarKbFocus_fn = nil
 -- so duplicate scheduleIn(0) calls are dropped within the same event-loop tick.
 local _navpager_rebuild_pending = false
 
+local _raiseHSFromStack  -- forward declaration; defined below near closeReaderToHomescreen
+
+-- Ensure the goal-tap callback is initialised. Called before any HS.show()
+-- or _raiseHSFromStack() that may need it. Idempotent: addToMainMenu is a
+-- no-op once _goalTapCallback has been set.
+local function _ensureGoalCallback(plugin_ref)
+    if not plugin_ref._goalTapCallback then
+        plugin_ref:addToMainMenu({})
+    end
+end
+
+-- Build the standard QA-tap callback closure for the given plugin reference.
+local function _makeQaTap(plugin_ref)
+    return function(aid)
+        plugin_ref:_navigate(aid, plugin_ref.ui, Config.loadTabConfig(), false)
+    end
+end
+
+-- Cold-path HS show: activate the homescreen tab in the FM bar, then call
+-- HS.show() with the standard callbacks.  Sets _navbar_prev_action on the
+-- freshly-created instance.
+-- Caller must guard against HS._instance already being set (warm path).
+local function _showHSCold(plugin_ref, HS_ref, prev_action)
+    local tabs = Config.loadTabConfig()
+    Bottombar.setActiveAndRefreshFM(plugin_ref, "homescreen", tabs)
+    _ensureGoalCallback(plugin_ref)
+    HS_ref.show(_makeQaTap(plugin_ref), plugin_ref._goalTapCallback)
+    local inst = HS_ref._instance
+    if inst then inst._navbar_prev_action = prev_action end
+end
+
+-- Close all non-fullscreen widgets on the stack except the FM.
+-- Used before restoring the homescreen so orphaned toasts/toasters are gone.
+local function _closeOrphanedPopups(fm_ref, hs_inst)
+    local stack    = UI.getWindowStack()
+    local to_close = {}
+    for _, entry in ipairs(stack) do
+        local w = entry.widget
+        if w and w ~= fm_ref and not w.covers_fullscreen
+                and not (hs_inst and w == hs_inst) then
+            to_close[#to_close + 1] = w
+        end
+    end
+    for _, w in ipairs(to_close) do UIManager:close(w) end
+end
+
+-- Show an InfoMessage using UIManager directly (avoids capturing the local
+-- UIManager upvalue inside patchCollections closures where it may be stale).
+local function _showInfoMsg(text, timeout)
+    local ok, IM = pcall(require, "ui/widget/infomessage")
+    if ok and IM then
+        UIManager:show(IM:new{ text = text, timeout = timeout or 2 })
+    end
+end
+
 -- ---------------------------------------------------------------------------
 -- Private helpers
 -- ---------------------------------------------------------------------------
 
 local function isStartWithHS()
+    if _start_with_hs == nil then
+        _start_with_hs = G_reader_settings:readSetting("start_with", "filemanager") == "homescreen_simpleui"
+    end
     return _start_with_hs
 end
 
@@ -190,8 +250,8 @@ function M.patchFileManagerClass(plugin)
             UIManager:scheduleIn(0, function()
                 local HS2 = liveHS()
                 if not HS2 then return end
-                if not plugin._goalTapCallback then plugin:addToMainMenu({}) end
-                local qa_tap   = rot_qa_tap   or function(aid) plugin:_navigate(aid, plugin.ui, Config.loadTabConfig(), false) end
+                _ensureGoalCallback(plugin)
+                local qa_tap   = rot_qa_tap   or _makeQaTap(plugin)
                 local goal_tap = rot_goal_tap or plugin._goalTapCallback
                 HS2.show(qa_tap, goal_tap)
             end)
@@ -415,8 +475,8 @@ function M.patchFileManagerClass(plugin)
                         local ok, m = pcall(require, "sui_homescreen"); return ok and m
                     end)()
                     if HS then
-                        if not plugin._goalTapCallback then plugin:addToMainMenu({}) end
-                        local qa_tap   = rot_qa_tap   or function(aid) plugin:_navigate(aid, plugin.ui, Config.loadTabConfig(), false) end
+                        _ensureGoalCallback(plugin)
+                        local qa_tap   = rot_qa_tap   or _makeQaTap(plugin)
                         local goal_tap = rot_goal_tap or plugin._goalTapCallback
                         HS.show(qa_tap, goal_tap)
                     end
@@ -431,7 +491,13 @@ function M.patchFileManagerClass(plugin)
 
             if this._navbar_container then
                 local t = Config.loadTabConfig()
-                local return_to_folder = SUISettings:isTrue("simpleui_hs_return_to_book_folder")
+                -- _sui_return_to_book_folder_pending is set by closeReaderToHomescreen
+                -- when "Return to Book Folder" is on. Consume it now so it fires
+                -- exactly once per close, then honour it exactly like return_to_folder=true.
+                local pending_folder = this._sui_return_to_book_folder_pending
+                this._sui_return_to_book_folder_pending = nil
+                local return_to_folder = pending_folder
+                    or SUISettings:isTrue("simpleui_hs_return_to_book_folder")
                 if not return_to_folder then
                     plugin.active_action = "home"
                     local home = G_reader_settings:readSetting("home_dir")
@@ -468,9 +534,7 @@ function M.patchFileManagerClass(plugin)
             -- current before any repaint that follows.
             local HS_live = liveHS()
             if HS_live and HS_live._instance then
-                HS_live._instance._on_qa_tap = function(aid)
-                    plugin:_navigate(aid, plugin.ui, Config.loadTabConfig(), false)
-                end
+                HS_live._instance._on_qa_tap = _makeQaTap(plugin)
             end
             if not this._navbar_container then return end
             -- Skip the bar rebuild when navigate() set _navbar_tab_nav_in_progress:
@@ -896,13 +960,7 @@ function M.patchCollections(plugin)
             -- Prevent renaming the TBR collection — its name is the plugin's key.
             local TBR = package.loaded["desktop_modules/module_tbr"]
             if TBR and old_name == TBR.TBR_COLL_NAME then
-                local ok_im, InfoMessage = pcall(require, "ui/widget/infomessage")
-                if ok_im then
-                    require("ui/uimanager"):show(InfoMessage:new{
-                        text    = _("The «To Be Read» collection cannot be renamed."),
-                        timeout = 2,
-                    })
-                end
+                _showInfoMsg(_("The «To Be Read» collection cannot be renamed."))
                 return  -- abort
             end
             local result = orig_rename(rc_self, old_name, new_name, ...)
@@ -944,13 +1002,7 @@ function M.patchCollections(plugin)
                 local count = 0
                 if coll then for _ in pairs(coll) do count = count + 1 end end
                 if count >= (TBR.TBR_MAX or 5) then
-                    local ok_im, InfoMessage = pcall(require, "ui/widget/infomessage")
-                    if ok_im then
-                        require("ui/uimanager"):show(InfoMessage:new{
-                            text    = _("To Be Read list is full (max. 5 books)."),
-                            timeout = 2,
-                        })
-                    end
+                    _showInfoMsg(_("To Be Read list is full (max. 5 books)."))
                     return  -- abort — do NOT call orig_add
                 end
             end
@@ -961,117 +1013,6 @@ function M.patchCollections(plugin)
                     plugin:_scheduleRebuild()
                 end)
                 if not ok2 then logger.warn("simpleui: RC.addItem TBR hook:", tostring(err)) end
-            end
-        end
-    end
-
-    if type(RC.addItemsMultiple) == "function" then
-        local orig_add_multiple = RC.addItemsMultiple
-        plugin._orig_rc_additemsmultiple = orig_add_multiple
-        RC.addItemsMultiple = function(rc_self, files, collections_to_add, ...)
-            local TBR = _getTBR()
-            if TBR and collections_to_add[TBR.TBR_COLL_NAME] then
-                -- Count how many slots remain in the TBR collection.
-                local coll  = rc_self.coll and rc_self.coll[TBR.TBR_COLL_NAME]
-                local count = 0
-                if coll then for _ in pairs(coll) do count = count + 1 end end
-                local max     = TBR.TBR_MAX or 5
-                local allowed = max - count
-                if allowed <= 0 then
-                    -- No room at all — block addition and warn.
-                    collections_to_add = {}
-                    for k, v in pairs(collections_to_add or {}) do
-                        if k ~= TBR.TBR_COLL_NAME then collections_to_add[k] = v end
-                    end
-                    local ok_im, InfoMessage = pcall(require, "ui/widget/infomessage")
-                    if ok_im then
-                        require("ui/uimanager"):show(InfoMessage:new{
-                            text    = _("To Be Read list is full (max. 5 books)."),
-                            timeout = 2,
-                        })
-                    end
-                    -- Still call orig for any other collections in the map.
-                    local stripped = {}
-                    for k, v in pairs(collections_to_add) do
-                        if k ~= TBR.TBR_COLL_NAME then stripped[k] = v end
-                    end
-                    if next(stripped) then
-                        orig_add_multiple(rc_self, files, stripped, ...)
-                    end
-                    return 0
-                elseif allowed < (function() local n=0; for _ in pairs(files) do n=n+1 end; return n end)() then
-                    -- Partial room — let the original run but truncate TBR additions afterwards
-                    -- by removing any excess entries that pushed it over the limit.
-                    local result = orig_add_multiple(rc_self, files, collections_to_add, ...)
-                    local coll2 = rc_self.coll and rc_self.coll[TBR.TBR_COLL_NAME]
-                    if coll2 then
-                        -- Build ordered list and drop those beyond TBR_MAX.
-                        local items = {}
-                        for _, item in pairs(coll2) do items[#items+1] = item end
-                        table.sort(items, function(a,b) return (a.order or 0) < (b.order or 0) end)
-                        if #items > max then
-                            for i = max + 1, #items do
-                                coll2[items[i].file] = nil
-                            end
-                            rc_self:write({ [TBR.TBR_COLL_NAME] = true })
-                        end
-                        local ok_im, InfoMessage = pcall(require, "ui/widget/infomessage")
-                        if ok_im then
-                            require("ui/uimanager"):show(InfoMessage:new{
-                                text    = _("To Be Read list is full (max. 5 books)."),
-                                timeout = 2,
-                            })
-                        end
-                    end
-                    pcall(function() _syncTBRSettings(TBR); plugin:_scheduleRebuild() end)
-                    return result
-                end
-            end
-            local result = orig_add_multiple(rc_self, files, collections_to_add, ...)
-            local TBR2 = _getTBR()
-            if TBR2 and collections_to_add[TBR2.TBR_COLL_NAME] then
-                pcall(function() _syncTBRSettings(TBR2); plugin:_scheduleRebuild() end)
-            end
-            return result
-        end
-    end
-
-    if type(RC.addRemoveItemMultiple) == "function" then
-        local orig_add_remove = RC.addRemoveItemMultiple
-        plugin._orig_rc_addremoveitemmultiple = orig_add_remove
-        RC.addRemoveItemMultiple = function(rc_self, file, collections_to_add, ...)
-            local TBR = _getTBR()
-            if TBR and collections_to_add[TBR.TBR_COLL_NAME] then
-                local coll  = rc_self.coll and rc_self.coll[TBR.TBR_COLL_NAME]
-                local count = 0
-                if coll then for _ in pairs(coll) do count = count + 1 end end
-                local max = TBR.TBR_MAX or 5
-                -- Check if this file is already in TBR (would be a no-op add).
-                local real = file
-                pcall(function() real = require("ffi/util").realpath(file) or file end)
-                local already_in = coll and coll[real] ~= nil
-                if not already_in and count >= max then
-                    -- Strip TBR from the add map and warn.
-                    local stripped = {}
-                    for k, v in pairs(collections_to_add) do
-                        if k ~= TBR.TBR_COLL_NAME then stripped[k] = v end
-                    end
-                    local ok_im, InfoMessage = pcall(require, "ui/widget/infomessage")
-                    if ok_im then
-                        require("ui/uimanager"):show(InfoMessage:new{
-                            text    = _("To Be Read list is full (max. 5 books)."),
-                            timeout = 2,
-                        })
-                    end
-                    orig_add_remove(rc_self, file, stripped, ...)
-                    pcall(function() _syncTBRSettings(TBR); plugin:_scheduleRebuild() end)
-                    return
-                end
-            end
-            orig_add_remove(rc_self, file, collections_to_add, ...)
-            local TBR2 = _getTBR()
-            if TBR2 and collections_to_add[TBR2.TBR_COLL_NAME] then
-                pcall(function() _syncTBRSettings(TBR2); plugin:_scheduleRebuild() end)
             end
         end
     end
@@ -1264,6 +1205,12 @@ function M.patchUIManagerShow(plugin)
             return orig_show(um_self, widget, ...)
         end
 
+        -- Wire the native "File browser" menu tab to use our flash-free
+        -- close path every time a ReaderUI is shown (guard inside the fn).
+        if widget.name == "ReaderUI" then
+            pcall(M.wireReaderMenuFMTab, plugin, widget)
+        end
+
         local n_extra    = select("#", ...)
         local extra_args = n_extra > 0 and { ... } or _EMPTY
         _show_depth = _show_depth + 1
@@ -1271,45 +1218,6 @@ function M.patchUIManagerShow(plugin)
         -- Wrap in pcall so _show_depth is always decremented even on error.
         local ok, result = pcall(function()
 
-        -- When the FM appears after the reader closes with "Start with Homescreen"
-        -- active, show the FM silently then immediately open the HS on top.
-        if _show_depth == 1 and _hs_pending_after_reader
-                and widget == plugin.ui and isStartWithHS() then
-            _hs_pending_after_reader = false
-            if n_extra > 0 then
-                orig_show(um_self, widget, table.unpack(extra_args))
-            else
-                orig_show(um_self, widget)
-            end
-            -- Skip HS re-open if an external caller navigated the FM to a folder.
-            if widget._sui_show_folder_pending then
-                widget._sui_show_folder_pending = nil
-                return
-            end
-            local HS = liveHS() or (function()
-                local ok2, m = pcall(require, "sui_homescreen"); return ok2 and m
-            end)()
-            if HS and not HS._instance then
-                if not plugin._goalTapCallback then plugin:addToMainMenu({}) end
-                -- active_action was already set to "homescreen" in UIManager.close
-                -- (when _hs_pending_after_reader was flagged), so no replaceBar or setDirty
-                -- needed here — the FM is covered by the HS and its paint is never visible.
-                -- Use the stashed pre-change value so _navbar_prev_action records the real
-                -- tab that was active before the reader was opened (e.g. "home"), not
-                -- "homescreen" which active_action was changed to.
-                local prev_action = _hs_pending_prev_action or plugin.active_action
-                _hs_pending_prev_action = nil
-                HS.show(
-                    function(aid) plugin:_navigate(aid, plugin.ui, Config.loadTabConfig(), false) end,
-                    plugin._goalTapCallback
-                )
-                -- Fix _navbar_prev_action: overwrite with the real previous tab so
-                -- Back closes to the correct tab.
-                local hs_inst = HS._instance
-                if hs_inst then hs_inst._navbar_prev_action = prev_action end
-            end
-            return
-        end
 
         -- Decide whether to inject the navbar into this widget.
         -- Check the Bar Injection API registry first (O(n) over a tiny list).
@@ -1683,26 +1591,10 @@ function M.patchUIManagerClose(plugin)
         end
 
         -- Close any orphaned non-fullscreen widgets before showing the HS.
-        local stack    = UI.getWindowStack()
-        local to_close = {}
-        for _, entry in ipairs(stack) do
-            local w = entry.widget
-            if w and w ~= fm and not w.covers_fullscreen then
-                to_close[#to_close + 1] = w
-            end
-        end
-        for _, w in ipairs(to_close) do UIManager:close(w) end
+        _closeOrphanedPopups(fm, nil)
 
-        local tabs        = Config.loadTabConfig()
         local prev_action = plugin_ref.active_action
-        Bottombar.setActiveAndRefreshFM(plugin_ref, "homescreen", tabs)
-        if not plugin_ref._goalTapCallback then plugin_ref:addToMainMenu({}) end
-        HS.show(
-            function(aid) plugin_ref:_navigate(aid, plugin_ref.ui, Config.loadTabConfig(), false) end,
-            plugin_ref._goalTapCallback
-        )
-        local hs_inst = HS._instance
-        if hs_inst then hs_inst._navbar_prev_action = prev_action end
+        _showHSCold(plugin_ref, HS, prev_action)
     end
 
     UIManager.close = function(um_self, widget, ...)
@@ -1784,11 +1676,15 @@ function M.patchUIManagerClose(plugin)
         end
         -- ────────────────────────────────────────────────────────────────────
 
-        -- When the FM closes, also close the homescreen so the app can exit.
+        -- When the FM closes, close the homescreen too — but ONLY when the
+        -- app is actually exiting.  If the FM is closing because the reader
+        -- is opening we leave the HS alive on the stack; _raiseHSFromStack()
+        -- will promote it back to the top when the reader closes, giving the
+        -- same warm-path behaviour as the Bookshelf plugin.
         if widget_is_fm then
             local HS      = liveHS()
             local hs_inst = HS and HS._instance
-            if hs_inst then
+            if hs_inst and UIManager._exit_code ~= nil then
                 hs_inst._navbar_closing_intentionally = true
                 orig_close(um_self, hs_inst)  -- bypass our wrapper
                 if HS._instance == hs_inst then HS._instance = nil end
@@ -1820,6 +1716,14 @@ function M.patchUIManagerClose(plugin)
         -- Re-open the homescreen after a fullscreen widget closes, subject to guards.
         -- Exclude widgets that claim covers_fullscreen but are mere popups with no
         -- title_bar and no name (e.g. VocabBuilder's MenuDialog).
+        --
+        -- Primary reader→HS paths are handled upstream (flash-free):
+        --   • Bottombar tab tap   → navigate() → closeReaderToHomescreen
+        --   • Gesture             → onSimpleUIGoHomescreen → closeReaderToHomescreen
+        --   • Native FM menu tab  → wireReaderMenuFMTab callback
+        -- closeReaderToHomescreen sets tearing_down=true, so the ReaderUI branch
+        -- below is skipped for those paths. This block is a last-resort fallback
+        -- for any path not covered above (e.g. a third-party plugin closing the reader).
         if isStartWithHS()
                 and widget.covers_fullscreen
                 and (widget.title_bar or widget.name)
@@ -1840,36 +1744,28 @@ function M.patchUIManagerClose(plugin)
             end
             if not other_open then
                 if widget.name == "ReaderUI" then
-                    -- Reader closed back to the FM (not opening another book).
+                    -- Fallback: reader closed without going through closeReaderToHomescreen.
+                    -- tearing_down guards against double-firing with that function.
                     if not widget.tearing_down then
                         local return_to_folder = SUISettings:isTrue("simpleui_hs_return_to_book_folder")
                         if not return_to_folder then
-                            _hs_pending_after_reader = true
-                            -- Stash the real previous tab so the _hs_pending handler can
-                            -- set it on hs_inst._navbar_prev_action correctly, even after
-                            -- active_action is changed to "homescreen" below.
-                            _hs_pending_prev_action = plugin.active_action
-                            -- Pre-set active_action so that when UIManager.show(HS) runs
-                            -- the inject-path guard sees "homescreen" and skips the redundant
-                            -- setActiveAndRefreshFM + setDirty(FM) — the FM is covered by HS
-                            -- and its bar will be corrected by _restoreTabInFM when HS closes.
+                            local prev_action = plugin.active_action
                             local _ao2 = { bookmark_browser=true, wifi_toggle=true, frontlight=true, power=true }
-                        if plugin.active_action == nil or not _ao2[plugin.active_action] then
+                            if plugin.active_action == nil or not _ao2[plugin.active_action] then
                                 plugin.active_action = "homescreen"
                             end
-                            -- Lazy refresh: the user is looking at the HS, not the FM
-                            -- file list. Deferring refreshPath() until the HS closes
-                            -- eliminates I/O contention with the HS widget build and
-                            -- first e-ink paint, making the book→HS transition faster.
-                            -- The flag is consumed in patchUIManagerClose when
-                            -- widget.name == "homescreen" closes (user taps Library/Back).
                             local fm_ref = liveFM()
-                            if fm_ref then
-                                fm_ref._sui_lazy_refresh_path = true
-                            end
+                            if fm_ref then fm_ref._sui_lazy_refresh_path = true end
+                            UIManager:nextTick(function()
+                                if UIManager._exit_code ~= nil then return end
+                                local RUI2 = package.loaded["apps/reader/readerui"]
+                                if RUI2 and RUI2.instance then return end
+                                if _raiseHSFromStack(plugin, prev_action) then return end
+                                local HS2 = liveHS()
+                                if not (HS2 and not HS2._instance) then return end
+                                _showHSCold(plugin, HS2, prev_action)
+                            end)
                         else
-                            -- Returning directly to the folder — FM is the visible
-                            -- target, so refresh immediately (0 delay, same tick).
                             UIManager:scheduleIn(0, function()
                                 local fm_ref = liveFM()
                                 if fm_ref and fm_ref.file_chooser then
@@ -1881,7 +1777,6 @@ function M.patchUIManagerClose(plugin)
                 else
                     UIManager:scheduleIn(0, function()
                         if UIManager._exit_code ~= nil then return end
-                        -- Skip if the reader is still open (user closed a sub-panel).
                         local RUI = package.loaded["apps/reader/readerui"]
                         if RUI and RUI.instance then return end
                         local fm2 = liveFM()
@@ -2257,9 +2152,7 @@ function M.showHSAfterResume(plugin)
         -- stale FileManager reference.  main.lua:onResume does this too, but
         -- the callback here is the authoritative one passed to HS.show() — keep
         -- both in sync so whichever fires first is already correct.
-        HS._instance._on_qa_tap = function(aid)
-            plugin:_navigate(aid, plugin.ui, Config.loadTabConfig(), false)
-        end
+        HS._instance._on_qa_tap = _makeQaTap(plugin)
         return
     end
 
@@ -2274,9 +2167,7 @@ function M.showHSAfterResume(plugin)
         if HS2 and HS2._instance then
             -- Same staleness guard for the deferred path: the HS appeared
             -- between the outer check and the scheduleIn(0) callback.
-            HS2._instance._on_qa_tap = function(aid)
-                plugin:_navigate(aid, plugin.ui, Config.loadTabConfig(), false)
-            end
+            HS2._instance._on_qa_tap = _makeQaTap(plugin)
             return
         end
 
@@ -2292,14 +2183,11 @@ function M.showHSAfterResume(plugin)
         local t           = Config.loadTabConfig()
         local prev_action = plugin.active_action
         Bottombar.setActiveAndRefreshFM(plugin, "homescreen", t)
-        if not plugin._goalTapCallback then plugin:addToMainMenu({}) end
+        _ensureGoalCallback(plugin)
         -- Always start at page 1 after resume; restoring the last page
         -- would be disorienting after waking from standby.
         HS2._current_page = 1
-        HS2.show(
-            function(aid) plugin:_navigate(aid, plugin.ui, Config.loadTabConfig(), false) end,
-            plugin._goalTapCallback
-        )
+        HS2.show(_makeQaTap(plugin), plugin._goalTapCallback)
         local hs_inst = HS2._instance
         if hs_inst then hs_inst._navbar_prev_action = prev_action end
     end)
@@ -2372,6 +2260,129 @@ function M.patchBookInfoNavigation(plugin)
 end
 
 -- ---------------------------------------------------------------------------
+-- Fix: wrap filemanagerutil.genStatusButtonsRow (and genMultipleStatusButtonsRow)
+-- so that marking a book as finished/reading/abandoned from the library
+-- immediately invalidates the StatsProvider cache and the sidecar cache entry.
+--
+-- Without this patch, SP.invalidate() is only called from onCloseDocument
+-- (when a book is actually opened and then closed). Setting the status from
+-- the library writes the sidecar directly via filemanagerutil.saveSummary but
+-- no event is broadcast, so books_year/books_total stay stale until the next
+-- reading session.
+--
+-- Strategy: wrap both genStatusButtonsRow and genMultipleStatusButtonsRow so
+-- that each status-button callback, after doing its own work and calling the
+-- original caller_callback, also:
+--   1. Invalidates the sidecar cache entry for the affected file (so the next
+--      prefetchBooks() re-reads the updated summary instead of using the
+--      stale cached value).
+--   2. Calls SP.invalidate() to discard the books_year/books_total counts so
+--      the next homescreen render re-runs the sidecar scan.
+--   3. Sets HS._stats_need_refresh = true so the homescreen rebuilds when it
+--      next becomes visible (mirrors what onCloseDocument does).
+-- ---------------------------------------------------------------------------
+
+local function _onStatusChanged(file)
+    -- 1. Invalidate the sidecar cache for this file so the stale summary is
+    --    not reused when the homescreen re-renders.
+    local SH = package.loaded["desktop_modules/module_books_shared"]
+    if SH and SH.invalidateSidecarCache then
+        pcall(SH.invalidateSidecarCache, file)
+    end
+
+    -- 2. Invalidate the StatsProvider cache so books_year/books_total are
+    --    re-counted from sidecars on the next render.
+    local SP = package.loaded["desktop_modules/module_stats_provider"]
+    if SP and SP.invalidate then
+        pcall(SP.invalidate)
+    end
+
+    -- 3. Invalidate the homescreen context cache and flag for stats refresh.
+    --    _stats_need_refresh alone is not enough: onShow() reads it but then
+    --    calls _updatePage(keep_cache=true), which reuses _ctx_cache — so the
+    --    stale ctx.stats survives. We must also clear _ctx_cache so that the
+    --    next _updatePage() call re-runs _buildCtx() and fetches fresh stats
+    --    from the now-invalidated StatsProvider.
+    local ok_hs, HS = pcall(require, "sui_homescreen")
+    if ok_hs and HS then
+        -- Flag for the class-level check in onShow.
+        HS._stats_need_refresh = true
+        -- Also clear the cache on the live instance (if the HS is currently
+        -- open behind the FM/library dialog).
+        local inst = HS._instance
+        if inst then
+            inst._ctx_cache          = nil
+            inst._stats_need_refresh = true
+        end
+    end
+end
+
+function M.patchStatusButtons(plugin)
+    local ok_util, fmutil = pcall(require, "apps/filemanager/filemanagerutil")
+    if not ok_util or not fmutil then return end
+    if fmutil._simpleui_status_buttons_patched then return end
+    fmutil._simpleui_status_buttons_patched = true
+
+    -- ── genStatusButtonsRow ────────────────────────────────────────────────
+    -- The single-file variant changes status directly (no ConfirmBox), but
+    -- using caller_callback injection is simpler and equally correct: the
+    -- status is written before caller_callback() is called inside orig_gen_row.
+    local orig_gen_row = fmutil.genStatusButtonsRow
+    plugin._orig_fmutil_gen_status_row = orig_gen_row
+
+    fmutil.genStatusButtonsRow = function(doc_settings_or_file, caller_callback)
+        -- Resolve the filepath once, before the buttons are built.
+        local file
+        if type(doc_settings_or_file) == "table" then
+            file = doc_settings_or_file:readSetting("doc_path")
+        else
+            file = doc_settings_or_file
+        end
+
+        local wrapped_callback = function()
+            if caller_callback then caller_callback() end
+            if file then _onStatusChanged(file) end
+        end
+        return orig_gen_row(doc_settings_or_file, wrapped_callback)
+    end
+
+    -- ── genMultipleStatusButtonsRow ────────────────────────────────────────
+    -- genMultipleStatusButtonsRow shows a ConfirmBox before actually changing
+    -- the status. We cannot wrap btn.callback (it fires before confirmation).
+    -- Instead, we inject _onStatusChanged into the caller_callback so it runs
+    -- after the status has been written to disk (inside ok_callback → caller_callback).
+    local orig_gen_multi = fmutil.genMultipleStatusButtonsRow
+    plugin._orig_fmutil_gen_status_multi = orig_gen_multi
+
+    fmutil.genMultipleStatusButtonsRow = function(files, caller_callback, button_disabled)
+        local wrapped_callback = function()
+            if caller_callback then caller_callback() end
+            if type(files) == "table" then
+                for f in pairs(files) do
+                    _onStatusChanged(f)
+                end
+            end
+        end
+        return orig_gen_multi(files, wrapped_callback, button_disabled)
+    end
+end
+
+function M.unpatchStatusButtons(plugin)
+    local fmutil = package.loaded["apps/filemanager/filemanagerutil"]
+    if not fmutil or not fmutil._simpleui_status_buttons_patched then return end
+
+    if plugin._orig_fmutil_gen_status_row then
+        fmutil.genStatusButtonsRow        = plugin._orig_fmutil_gen_status_row
+        plugin._orig_fmutil_gen_status_row = nil
+    end
+    if plugin._orig_fmutil_gen_status_multi then
+        fmutil.genMultipleStatusButtonsRow        = plugin._orig_fmutil_gen_status_multi
+        plugin._orig_fmutil_gen_status_multi      = nil
+    end
+    fmutil._simpleui_status_buttons_patched = nil
+end
+
+-- ---------------------------------------------------------------------------
 -- installAll / teardownAll
 -- ---------------------------------------------------------------------------
 
@@ -2440,81 +2451,246 @@ end
 -- Close the reader and open the Homescreen afterwards, exactly as if
 -- "Start with Homescreen" were active, regardless of the actual setting.
 -- Safe to call when the reader is NOT open (no-op in that case).
-function M.closeReaderToHomescreen(plugin)
+-- ---------------------------------------------------------------------------
+-- _raiseHSFromStack  — warm-path promotion of the suspended HS widget.
+--
+-- When the reader opened, the HS was left alive at the bottom of the
+-- UIManager stack instead of being destroyed.  This function:
+--   1. Finds the HS entry and moves it to the top of the stack (O(n)).
+--   2. Re-injects a fresh navbar (new FM instance, correct tabs/bar).
+--   3. Calls _refresh(false) to update only the fields invalidated by
+--      onCloseDocument (progress, stats, book order) — no full rebuild.
+--   4. Fires setDirty so the e-ink compositor repaints.
+--
+-- Returns true  → warm-path taken, caller must NOT call HS.show().
+-- Returns false → HS was not on the stack; caller falls back to HS.show().
+-- ---------------------------------------------------------------------------
+_raiseHSFromStack = function(plugin, prev_action)
+    local HS      = liveHS()
+    local hs_inst = HS and HS._instance
+    if not hs_inst then return false end
+
+    -- Move to top of the window stack.
+    local stack = UIManager._window_stack
+    if not stack then return false end
+    local found = false
+    for i = 1, #stack do
+        if stack[i].widget == hs_inst then
+            if i ~= #stack then
+                local entry = table.remove(stack, i)
+                table.insert(stack, entry)
+            end
+            found = true
+            break
+        end
+    end
+    if not found then
+        -- Widget was evicted from the stack unexpectedly — fall back.
+        HS._instance = nil
+        return false
+    end
+
+    -- Re-inject a fresh navbar for the new FM instance.
+    local tabs = Config.loadTabConfig()
+    Bottombar.setActiveAndRefreshFM(plugin, "homescreen", tabs)
+    _ensureGoalCallback(plugin)
+    local navbar_container, wrapped, bar, topbar,
+          bar_idx, topbar_on, topbar_idx =
+              UI.wrapWithNavbar(hs_inst._navbar_inner, "homescreen", tabs, true)
+    UI.applyNavbarState(hs_inst, navbar_container, bar, topbar,
+                        bar_idx, topbar_on, topbar_idx, tabs)
+    hs_inst._navbar_injected    = true
+    hs_inst._navbar_prev_action = prev_action
+    hs_inst[1]                  = wrapped
+
+    -- Refresh stale data (stats, progress, book order).
+    hs_inst._on_qa_tap   = _makeQaTap(plugin)
+    hs_inst._on_goal_tap = plugin._goalTapCallback
+    pcall(function() hs_inst:_refresh(false) end)
+
+    -- Scope the dirty region to the widget's own dimen (same approach as
+    -- Bookshelf:_raiseInPlace). On colour panels, a full-screen "ui" dirty
+    -- can be promoted to a full flash by the EPDC driver; the dimen-scoped
+    -- form stays as a "ui" waveform and merges cleanly with the single
+    -- repaint queued by the caller.
+    UIManager:setDirty(hs_inst, function()
+        return "ui", hs_inst.dimen
+    end)
+    return true
+end
+
+-- ---------------------------------------------------------------------------
+-- _prepareReaderClose
+--
+-- Sets all pre-close flags before the actual onClose call.
+-- Returns: file, return_to_folder, prev_action
+-- ---------------------------------------------------------------------------
+local function _prepareReaderClose(plugin, readerui, via_gesture)
+    local file = readerui.document and readerui.document.file
+    local return_to_folder = SUISettings:isTrue("simpleui_hs_return_to_book_folder")
+    local fm_pre = liveFM()
+
+    -- lazy_refresh defers FM file-list scan until HS closes (I/O optimisation).
+    -- Skip when returning to book folder: FM path != home_dir, so a lazy
+    -- refresh-path would navigate away from the book's folder.
+    if fm_pre and not return_to_folder then
+        fm_pre._sui_lazy_refresh_path = true
+    end
+    -- Signal FM onShow hook: do NOT override the path back to home_dir.
+    if fm_pre and return_to_folder then
+        fm_pre._sui_return_to_book_folder_pending = true
+    end
+
+    local prev_action = plugin.active_action
+    plugin._closing_via_gesture = via_gesture
+    -- Mark tearing_down so patchUIManagerClose's ReaderUI block does not try
+    -- to re-open the HS a second time while our close is in progress.
+    readerui.tearing_down = true
+
+    return file, return_to_folder, prev_action
+end
+
+-- ---------------------------------------------------------------------------
+-- _closeReaderToHomescreenSync
+--
+-- Synchronous inner body: onClose(false) + showFileManager + optional HS.
+-- Shared between closeReaderToHomescreen (gesture path, inside nextTick) and
+-- wireReaderMenuFMTab (TouchMenu path, called directly from the callback).
+--
+-- WHY THIS EXISTS:
+--   TouchMenuItem:onTapSelect calls UIManager:forceRePaint() after the item
+--   callback returns. If the reader close is deferred via nextTick, that flush
+--   happens with the TouchMenu gone but the book still on screen — a visible
+--   intermediate e-ink refresh. Native KOReader avoids this by running
+--   onClose() + showFileManager() synchronously inside the callback, before
+--   forceRePaint() fires. We mirror that with onClose(false) to suppress the
+--   internal "full" flash that the original onClose() would have queued.
+-- ---------------------------------------------------------------------------
+local function _closeReaderToHomescreenSync(plugin, readerui, file,
+                                             return_to_folder, prev_action)
+    if UIManager._exit_code ~= nil then return end
+
+    readerui:onClose(false)
+    -- showFileManager(file) navigates the FM to the book's parent folder
+    -- (last_dir derived from file path) — mirrors native behaviour.
+    readerui:showFileManager(file)
+
+    -- When "Return to Book Folder" is on: close the reader and land in the FM
+    -- at the book's folder with no HS — identical to native KOReader.
+    if return_to_folder then
+        plugin.active_action = "home"
+        return
+    end
+
+    -- Default path: raise or show the Homescreen on top of the FM.
+    local HS = liveHS() or (function()
+        local ok, m = pcall(require, "sui_homescreen"); return ok and m
+    end)()
+    if not HS then return end
+
+    local fm_ref = liveFM()
+    _closeOrphanedPopups(fm_ref, HS._instance)
+    if _raiseHSFromStack(plugin, prev_action) then return end
+
+    if HS._instance then return end
+    _showHSCold(plugin, HS, prev_action)
+end
+
+-- via_gesture: true (default) for gesture-triggered closes, false for menu-triggered.
+-- Controls plugin._closing_via_gesture so onCloseDocument shows the closing notice
+-- only when the mode warrants it (e.g. "gesture_only" must not fire for menu closes).
+--
+-- Uses nextTick so the gesture event handler returns before onClose runs.
+-- Safe for gestures because no forceRePaint() follows the gesture callback.
+-- For the TouchMenu path, wireReaderMenuFMTab calls _closeReaderToHomescreenSync
+-- directly (synchronous) to match native KOReader's single-repaint behaviour.
+function M.closeReaderToHomescreen(plugin, via_gesture)
+    if via_gesture == nil then via_gesture = true end
     local RUI = package.loaded["apps/reader/readerui"]
     if not (RUI and RUI.instance) then return end
     local readerui = RUI.instance
 
-    local file = readerui.document and readerui.document.file
+    local file, return_to_folder, prev_action =
+        _prepareReaderClose(plugin, readerui, via_gesture)
 
-    -- Set lazy_refresh so the FM file-list scan is deferred until the HS
-    -- closes, matching the native path's I/O optimisation.
-    local fm_pre = liveFM()
-    if fm_pre then fm_pre._sui_lazy_refresh_path = true end
-
-    -- Stash the current tab so the HS Back button returns to the right place.
-    local prev_action = plugin.active_action
-
-    -- Mark this close as gesture-triggered so onCloseDocument can distinguish
-    -- it from a menu-triggered close.  The flag is set here, immediately before
-    -- onClose(), and consumed (read + cleared) in onCloseDocument.
-    -- No KOReader internals are patched — this is entirely within our own code.
-    plugin._closing_via_gesture = true
-
-    if isStartWithHS() then
-        -- "Start with Homescreen" is active: mark tearing_down so the patched
-        -- UIManager.close does NOT set _hs_pending_after_reader (that path relies
-        -- on UIManager:show firing, which never happens when FM.instance already
-        -- exists — showFileManager just calls changeToPath instead). We open the
-        -- HS ourselves via scheduleIn below, same as the !isStartWithHS() path.
-        readerui.tearing_down = true
-    end
-
-    readerui:onClose()
-    readerui:showFileManager(file)
-
-    -- After the FM is on the stack, open the HS on top.
-    -- This handles both cases: when "Start with Homescreen" is active and when
-    -- it is not. When active, FM.instance already exists so UIManager:show is
-    -- never called and the _hs_pending_after_reader hook never fires — we must
-    -- open the HS directly. When not active, the UIManager patches gate on
-    -- isStartWithHS() so they would never open it either.
-    UIManager:scheduleIn(0, function()
-        if UIManager._exit_code ~= nil then return end
+    -- -----------------------------------------------------------------------
+    -- Flash elimination — mirror of Bookshelf:_safeShow() (#35 equivalent).
+    --
+    -- Previous sequence (caused FM flash):
+    --   readerui:onClose()        → queues UIManager:close(self.dialog, "full")
+    --   readerui:showFileManager()→ FM lands on stack
+    --   [event loop drains → FM painted with "full" flash]
+    --   scheduleIn(0) fires       → HS raised, "ui" repaint follows
+    --
+    -- New sequence (flash-free, gesture path):
+    --   nextTick fires (same event-loop batch as the gesture):
+    --     onClose(false)          → suppresses internal "full" refresh;
+    --                               onCloseDocument fires + flushes "Closing…" notice
+    --     showFileManager         → FM ready synchronously
+    --     _raiseHSFromStack/show  → HS on top in the same tick
+    --   [event loop drains → single "ui" repaint of HS or FM]
+    -- -----------------------------------------------------------------------
+    UIManager:nextTick(function()
+        -- Guard: another book opened between gesture and nextTick (edge case).
         local RUI2 = package.loaded["apps/reader/readerui"]
-        if RUI2 and RUI2.instance then return end
-        local HS = liveHS() or (function()
-            local ok, m = pcall(require, "sui_homescreen"); return ok and m
-        end)()
-        if not HS or HS._instance then return end
-        local fm_ref = liveFM()
-        -- Abort if another fullscreen widget is already on top of the FM.
-        if fm_ref then
-            for _, entry in ipairs(UI.getWindowStack()) do
-                local w = entry.widget
-                if w and w ~= fm_ref and w.covers_fullscreen then return end
-            end
-        end
-        -- Close any orphaned non-fullscreen popups before showing the HS.
-        local to_close = {}
-        for _, entry in ipairs(UI.getWindowStack()) do
-            local w = entry.widget
-            if w and w ~= fm_ref and not w.covers_fullscreen then
-                to_close[#to_close + 1] = w
-            end
-        end
-        for _, w in ipairs(to_close) do UIManager:close(w) end
-
-        local tabs = Config.loadTabConfig()
-        Bottombar.setActiveAndRefreshFM(plugin, "homescreen", tabs)
-        if not plugin._goalTapCallback then plugin:addToMainMenu({}) end
-        HS.show(
-            function(aid) plugin:_navigate(aid, plugin.ui, tabs, false) end,
-            plugin._goalTapCallback
-        )
-        local hs_inst = HS._instance
-        if hs_inst then hs_inst._navbar_prev_action = prev_action end
+        if RUI2 and RUI2.instance and RUI2.instance ~= readerui then return end
+        _closeReaderToHomescreenSync(plugin, readerui, file,
+                                     return_to_folder, prev_action)
     end)
+end
+
+-- ---------------------------------------------------------------------------
+-- wireReaderMenuFMTab
+--
+-- Replaces the native "File browser" tab callback in ReadingMenu with one
+-- that mirrors native KOReader's synchronous close sequence:
+--   onTapCloseMenu → onClose(false) → showFileManager [→ HS if needed]
+--
+-- The original plugin version deferred to nextTick here, which caused a
+-- visible intermediate flash: TouchMenuItem:onTapSelect calls forceRePaint()
+-- after the callback, flushing the e-ink with the menu closed but the reader
+-- still visible before the nextTick had a chance to run.
+--
+-- onClose(false) suppresses the "full" refresh that onClose() would queue,
+-- preventing the FM from flashing before the HS appears — same technique as
+-- the gesture path, but without the nextTick wrapper.
+-- ---------------------------------------------------------------------------
+function M.wireReaderMenuFMTab(plugin, readerui)
+    if not (readerui and readerui.menu) then return end
+    local menu_ref = readerui.menu
+    if menu_ref._simpleui_fm_tab_wrapped then return end
+    local items = menu_ref.menu_items
+    if not (items and items.filemanager) then return end
+
+    items.filemanager.callback = function()
+        -- Mirrors native KOReader's synchronous sequence exactly:
+        --   onTapCloseMenu → onClose(false) → showFileManager [→ HS]
+        --
+        -- We must NOT defer to nextTick here. TouchMenuItem:onTapSelect calls
+        -- UIManager:forceRePaint() after this callback returns. If the reader
+        -- close is deferred, that flush happens with the TouchMenu gone but the
+        -- book still on screen — an unwanted intermediate e-ink refresh.
+        -- Running synchronously means forceRePaint sees the HS/FM already in
+        -- place (same as native), producing a single clean transition.
+        --
+        -- The pre-notice block (our_msg) that previously bridged the
+        -- "TouchMenu-close gap" is no longer needed: onCloseDocument fires
+        -- synchronously inside onClose(false) and handles its own notice
+        -- flushing. The suppress flag (_suppress_closing_notice) was only
+        -- needed to prevent a duplicate; it is no longer set here.
+
+        -- Close the TouchMenu (synchronous, queues a repaint but does not
+        -- flush — the flush will happen after this entire callback returns).
+        if menu_ref.onTapCloseMenu then menu_ref:onTapCloseMenu() end
+
+        -- Run the reader close synchronously (no nextTick).
+        -- via_gesture=false: menu-triggered, "gesture_only" notice mode skipped.
+        local file, return_to_folder, prev_action =
+            _prepareReaderClose(plugin, readerui, false)
+        _closeReaderToHomescreenSync(plugin, readerui, file,
+                                     return_to_folder, prev_action)
+    end
+    menu_ref._simpleui_fm_tab_wrapped = true
 end
 
 -- Close the reader and return to the Library (FM at home_dir) with no
@@ -2602,15 +2778,27 @@ local function _paintWallpaper(bg_widget, bb, x, y)
     end
 end
 
-local function _getWallpaperBg()
+-- Returns the wallpaper bg widget when FM wallpaper is active, else nil.
+-- Combines _wallpaperEnabledFM + _getWallpaperBg into one pcall(require).
+-- All wallpaper paintTo hooks call this; the single pcall per frame replaces
+-- the previous two separate pcall(require) calls per invocation.
+local function _wallpaperBg()
     local ok, HS = pcall(require, "sui_homescreen")
-    if not (ok and HS and HS.styleGetBgWidget) then return nil end
+    if not (ok and HS and HS.styleGetWallpaperShowInFM
+            and HS.styleGetWallpaperShowInFM()) then return nil end
+    if not HS.styleGetBgWidget then return nil end
     return HS.styleGetBgWidget()
 end
 
+-- Kept for callers that only need the boolean (e.g. setupLayout background clear).
 local function _wallpaperEnabledFM()
     local ok, HS = pcall(require, "sui_homescreen")
-    return ok and HS and HS.styleGetWallpaperShowInFM()
+    return ok and HS and HS.styleGetWallpaperShowInFM and HS.styleGetWallpaperShowInFM()
+end
+
+-- Compatibility shim — internal callers replaced with _wallpaperBg().
+local function _getWallpaperBg()
+    return _wallpaperBg()
 end
 
 -- Recursively nil all COLOR_WHITE backgrounds in a widget tree.
@@ -2671,10 +2859,8 @@ local function _injectWallpaperIntoWidget(widget)
     -- Wrap paintTo on the outer FrameContainer.
     local _orig_pt = outer.paintTo
     function outer:paintTo(bb, x, y)
-        local live_bg = _wallpaperEnabledFM() and _getWallpaperBg() or nil
-        if live_bg then
-            _paintWallpaper(live_bg, bb, x, y)
-        end
+        local live_bg = _wallpaperBg()
+        if live_bg then _paintWallpaper(live_bg, bb, x, y) end
         _orig_pt(self, bb, x, y)
     end
 end
@@ -2720,12 +2906,8 @@ function M.patchWallpaperFM(plugin)
 
     FileManager.paintTo = function(fm_self, bb, x, y)
         -- Only intercept the FileManager instance (not subclasses / other callers).
-        if _wallpaperEnabledFM() then
-            local live_bg = _getWallpaperBg()
-            if live_bg then
-                _paintWallpaper(live_bg, bb, x, y)
-            end
-        end
+        local _live_bg_fm = _wallpaperBg()
+        if _live_bg_fm then _paintWallpaper(_live_bg_fm, bb, x, y) end
         -- Call the original paintTo (WidgetContainer:paintTo).
         if orig_fm_paintTo then
             orig_fm_paintTo(fm_self, bb, x, y)
@@ -3106,6 +3288,7 @@ function M.installAll(plugin)
     M.patchMenuInitForPagination(plugin)
     M.patchMenuForNavpager(plugin)
     M.patchBookInfoNavigation(plugin)
+    M.patchStatusButtons(plugin)
     -- Install the FM tab icon patch so system icon overrides survive menu rebuilds.
     local ok_ss, SUIStyle = pcall(require, "sui_style")
     if ok_ss and SUIStyle then
@@ -3224,14 +3407,6 @@ function M.teardownAll(plugin)
 
     local RC = package.loaded["readcollection"]
     if RC then
-        if plugin._orig_rc_additemsmultiple then
-            RC.addItemsMultiple              = plugin._orig_rc_additemsmultiple
-            plugin._orig_rc_additemsmultiple = nil
-        end
-        if plugin._orig_rc_addremoveitemmultiple then
-            RC.addRemoveItemMultiple              = plugin._orig_rc_addremoveitemmultiple
-            plugin._orig_rc_addremoveitemmultiple = nil
-        end
         if plugin._orig_rc_remove then
             RC.removeCollection    = plugin._orig_rc_remove
             plugin._orig_rc_remove = nil
@@ -3277,6 +3452,7 @@ function M.teardownAll(plugin)
         end
         fmutil._simpleui_bookinfo_nav_patched = nil
     end
+    M.unpatchStatusButtons(plugin)
 
     local FileManagerMenu = package.loaded["apps/filemanager/filemanagermenu"]
     if FileManagerMenu and FileManagerMenu._simpleui_startwith_patched then
@@ -3305,15 +3481,12 @@ function M.teardownAll(plugin)
 
     -- Reset module-level state so a re-enable cycle starts clean.
     -- Transient flags are cleared unconditionally.
-    -- _start_with_hs is re-read from the persisted setting instead of being
-    -- forced to false: if the user does disable→enable in the same session,
-    -- package.loaded keeps this module alive so the top-level initialiser
-    -- never runs again, and hardcoding false would leave isStartWithHS() wrong
-    -- for the rest of the session.
+    -- _start_with_hs is reset to nil (not false) so isStartWithHS() performs a
+    -- fresh lazy read on the next installAll cycle, picking up any setting
+    -- change made while the plugin was disabled.
     _hs_boot_done             = false
     _hs_pending_after_reader  = false
-    _hs_pending_prev_action   = nil
-    _start_with_hs            = G_reader_settings:readSetting("start_with", "filemanager") == "homescreen_simpleui"
+    _start_with_hs            = nil
     _navpager_rebuild_pending = false
 
     -- Clear lazy-refresh flag on the FM instance, if any.

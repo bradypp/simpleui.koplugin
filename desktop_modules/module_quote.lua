@@ -51,7 +51,8 @@ local Config       = require("sui_config")
 local UIManager       = require("ui/uimanager")
 
 local UI           = require("sui_core")
-local SUISettings = require("sui_store")
+local SUISettings  = require("sui_store")
+local SUIStyle     = require("sui_style")
 
 local PAD          = UI.PAD
 
@@ -65,13 +66,13 @@ local _CLR_TEXT_QUOTE = Blitbuffer.COLOR_BLACK
 
 
 
-local _BASE_QUOTE_FS     = Screen:scaleBySize(11)
+local _BASE_QUOTE_FS      = SUIStyle.FS_BODY    -- 18: quote body text
 
-local _BASE_QUOTE_ATTR_FS = Screen:scaleBySize(9)
+local _BASE_QUOTE_ATTR_FS = SUIStyle.FS_DETAIL  -- 15: attribution / author text
 
 local _BASE_QUOTE_GAP    = Screen:scaleBySize(4)
 
-local _BASE_QUOTE_ATTR_H = Screen:scaleBySize(11)
+local _BASE_QUOTE_ATTR_H = Screen:scaleBySize(20)
 
 -- Base height: PAD + approx 4 lines of text + gap + attribution + PAD2
 
@@ -1043,9 +1044,9 @@ function M.build(w, ctx)
 
 
 
-    local face_quote = Font:getFace("cfont", quote_fs)
+    local face_quote = Font:getFace(SUIStyle.FACE_REGULAR, quote_fs)
 
-    local face_attr  = Font:getFace("cfont", attr_fs)
+    local face_attr  = Font:getFace(SUIStyle.FACE_REGULAR, attr_fs)
 
     local vspan_gap  = VerticalSpan:new{ width = quote_gap }
 
@@ -1377,9 +1378,8 @@ function M.getMenuItems(ctx_menu)
         _makeScaleItem(ctx_menu),
 
         {
-            text_func = function()
-                return _lc("Alignment") .. " — " .. alignLabel(getAlignment(pfx))
-            end,
+            text_func  = function() return _lc("Alignment") end,
+            value_func = function() return alignLabel(getAlignment(pfx)) end,
             sub_item_table = {
                 {
                     text           = _lc("Left"),

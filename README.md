@@ -110,26 +110,29 @@ SimpleUI has full translation support. The UI language is detected automatically
 | English | *(built-in)* | Complete |
 | Português (Brasil) | `locale/pt_BR.po` | Complete |
 | Português (Portugal) | `locale/pt_PT.po` | Complete |
-| Русский (Russian) | `locale/ru.po` | Partial (76.8% — 132 missing) |
-| 繁體中文 (Chinese Traditional) | `locale/zh_TW.po` | Partial (76.1% — 136 missing) |
-| Polski (Polish) | `locale/pl.po` | Partial (75.6% — 139 missing) |
-| Español | `locale/es.po` | Partial (74.9% — 143 missing) |
-| Български (Bulgarian) | `locale/bg.po` | Partial (74.9% — 143 missing) |
-| Čeština (Czech) | `locale/cs.po` | Partial (74.7% — 144 missing) |
-| 简体中文 (Chinese Simplified) | `locale/zh_CN.po` | Partial (74.2% — 147 missing) |
-| Svenska (Swedish) | `locale/sv.po` | Partial (74.0% — 148 missing) |
-| Türkçe (Turkish) | `locale/tr.po` | Partial (74.0% — 148 missing) |
-| Українська (Ukrainian) | `locale/uk.po` | Partial (74.0% — 148 missing) |
-| Français (French) | `locale/fr.po` | Partial (71.9% — 160 missing) |
-| Română (Romanian) | `locale/ro.po` | Partial (71.0% — 165 missing) |
-| Română (Moldova) | `locale/ro_MD.po` | Partial (71.0% — 165 missing) |
-| Italiano (Italian) | `locale/it_IT.po` | Partial (70.3% — 169 missing) |
-| Tiếng Việt (Vietnamese) | `locale/vi.po` | Partial (63.4% — 208 missing) |
-| Deutsch (German) | `locale/de.po` | Partial (60.8% — 223 missing) |
+| Polski (Polish) | `locale/pl.po` | Partial (67.7% — 248 missing) |
+| Magyar (Hungarian) | `locale/hu.po` | Partial (64.7% — 271 missing) |
+| Български (Bulgarian) | `locale/bg.po` | Partial (64.6% — 272 missing) |
+| 简体中文 (Chinese Simplified) | `locale/zh_CN.po` | Partial (64.6% — 272 missing) |
+| Русский (Russian) | `locale/ru.po` | Partial (62.6% — 287 missing) |
+| Deutsch (German) | `locale/de.po` | Partial (52.0% — 369 missing) |
+| Čeština (Czech) | `locale/cs.po` | Partial (47.5% — 403 missing) |
+| Türkçe (Turkish) | `locale/tr.po` | Partial (47.4% — 404 missing) |
+| Українська (Ukrainian) | `locale/uk.po` | Partial (41.9% — 446 missing) |
+| Svenska (Swedish) | `locale/sv.po` | Partial (41.4% — 450 missing) |
+| Tiếng Việt (Vietnamese) | `locale/vi.po` | Partial (40.8% — 455 missing) ⚠️ |
+| Français (French) | `locale/fr.po` | Partial (40.1% — 460 missing) ⚠️ |
+| Română (Romanian) | `locale/ro.po` | Partial (43.0% — 438 missing) |
+| Română (Moldova) | `locale/ro_MD.po` | Partial (43.0% — 438 missing) |
+| Español | `locale/es.po` | Partial (33.6% — 510 missing) |
+| Italiano (Italian) | `locale/it_IT.po` | Partial (38.9% — 469 missing) ⚠️ |
+| 繁體中文 (Chinese Traditional) | `locale/zh_TW.po` | Partial (38.4% — 473 missing) |
+
+> ⚠️ These files contain syntax errors and may not load correctly. Contributions to fix them are welcome.
 
 ### Adding a new language
 
-All 569 strings in the plugin are translatable. To add a new language:
+All 768 strings in the plugin are translatable. To add a new language:
 
 1. Copy `locale/simpleui.pot` to `locale/<lang>.po`, using the standard locale code for your language (examples: `de`, `fr`, `it`, `ja`)
 2. Open the file in any text editor or a dedicated PO editor such as [Poedit](https://poedit.net/)
@@ -257,12 +260,6 @@ Every file in the pack root must be an `.svg` or `.png`. The filename (without e
 | `sui_navpager_prev.svg` | Navpager previous arrow |
 | `sui_navpager_next.svg` | Navpager next arrow |
 
-**Collections widget**
-
-| Filename | Description |
-|----------|-------------|
-| `sui_coll_back.svg` | Back / return arrow inside Collections |
-
 **Quick-action icons** (prefix `sui_action_`)
 
 | Filename | Description |
@@ -277,8 +274,10 @@ Every file in the pack root must be an `.svg` or `.png`. The filename (without e
 | `sui_action_wifi_toggle.svg` | Wi-Fi toggle (On) |
 | `sui_action_wifi_toggle_off.svg` | Wi-Fi toggle (Off) |
 | `sui_action_frontlight.svg` | Brightness |
+| `sui_action_night_mode.svg` | Night Mode |
 | `sui_action_stats_calendar.svg` | Reading Stats |
 | `sui_action_power.svg` | Power menu |
+| `sui_action_settings.svg` | SimpleUI Settings |
 | `sui_action_browse_authors.svg` | Browse by Author |
 | `sui_action_browse_series.svg` | Browse by Series |
 | `sui_action_browse_tags.svg` | Browse by Tags |
@@ -339,13 +338,14 @@ NightOwl/                       ← pack name (or NightOwl.zip)
   sui_pager_last.svg
   sui_navpager_prev.svg
   sui_navpager_next.svg
-  sui_coll_back.svg
   sui_action_library.svg
   sui_action_collections.svg
   sui_action_history.svg
   sui_action_continue.svg
   sui_action_frontlight.svg
+  sui_action_night_mode.svg
   sui_action_power.svg
+  sui_action_settings.svg
 ```
 
 All files are optional — a valid pack can contain as few as one icon.

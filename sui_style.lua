@@ -39,6 +39,8 @@
 --                                          Menu/FileChooser widget's chevron btns
 --   SUIStyle.applyCollBackIcon(widget)   — apply coll_back override to the
 --                                          page_return_arrow of a collections widget
+--   SUIStyle.performResetAllSystemIcons(plugin) — applies reset and triggers update routines
+--   SUIStyle.sui_build_system_icons(plugin, ctx_menu, ctx) — native RowPage renderer
 --
 -- Theme Colors API
 -- ──────────────
@@ -51,6 +53,8 @@ local SUISettings = require("sui_store")
 local logger      = require("logger")
 local _           = require("sui_i18n").translate
 local Blitbuffer  = require("ffi/blitbuffer")
+local Device      = require("device")
+local Screen      = Device.screen
 
 -- ---------------------------------------------------------------------------
 -- Slot catalogue
@@ -82,7 +86,7 @@ M.SLOTS = {
         id        = "sui_back",
         label     = function() return _("Back Button") end,
         group     = "sui_titlebar",
-        default_ko = "appbar.menu",   -- hamburger is the default inj_back icon
+        default_ko = "chevron.left",   -- matches the ICON_UP used at runtime
     },
     -- ── Browse Meta titlebar icons ───────────────────────────────────────
     -- These override the four icons used by the Browse button in the FM
@@ -239,6 +243,11 @@ function M.safeIconPath(path, fallback, slot_id)
         return fallback
     end
 
+    local Config = require("sui_config")
+    if Config.isNerdIcon(path) then
+        return path
+    end
+
     -- Extension check — fast, no I/O.
     local ext = path:match("%.([^.]+)$")
     if not ext or not _SUPPORTED_ICON_EXTS[ext:lower()] then
@@ -275,6 +284,43 @@ function M.resetAll()
     end
 end
 
+--- Clears every system icon override and triggers all runtime updates.
+function M.performResetAllSystemIcons(plugin)
+    M.resetAll()
+    
+    local fm = package.loaded["apps/filemanager/filemanager"] and package.loaded["apps/filemanager/filemanager"].instance
+    local ok_tb, TB = pcall(require, "sui_titlebar")
+    if ok_tb and TB then
+        local UIManager = require("ui/uimanager")
+        pcall(TB.reapplyAll, fm, UIManager._window_stack)
+        if TB.refreshBrowseIcons and fm then TB.refreshBrowseIcons(fm) end
+    end
+    
+    local UIManager = require("ui/uimanager")
+    if fm and fm.file_chooser then pcall(M.applyPaginationIcons, fm.file_chooser) end
+    if UIManager then
+        for _, entry in ipairs(UIManager._window_stack or {}) do
+            local w = entry.widget
+            if w and w.page_info_left_chev then pcall(M.applyPaginationIcons, w) end
+            if w and (w.name == "collections" or w.name == "coll_list") then pcall(M.applyCollBackIcon, w) end
+        end
+    end
+    
+    local ok_qa, QA2 = pcall(require, "sui_quickactions")
+    if ok_qa and QA2 and QA2.invalidateCustomQACache then QA2.invalidateCustomQACache() end
+    local ok_fc, FC = pcall(require, "sui_foldercovers")
+    if ok_fc and FC and FC.invalidateCache then FC.invalidateCache() end
+    
+    if fm and fm.file_chooser then
+        fm._navbar_suppress_path_change = true
+        fm.file_chooser:refreshPath()
+        fm._navbar_suppress_path_change = nil
+    end
+    if plugin then plugin:_rebuildAllNavbars() end
+    local HS = package.loaded["sui_homescreen"]
+    if HS and HS._instance then HS._instance:_refreshImmediate(false) end
+end
+
 -- ---------------------------------------------------------------------------
 -- Apply helpers — called by sui_titlebar.lua
 -- ---------------------------------------------------------------------------
@@ -285,20 +331,133 @@ end
 function M.applyIconToBtn(id, btn)
     local raw = M.getIcon(id)
     if not raw then return false end
-    if not (btn and btn.image) then return false end
+    if not btn then return false end
     local path = M.safeIconPath(raw, nil, id)
     if not path then return false end
-    -- CRITICAL: clear .icon before setting .file.
-    -- KOReader ImageWidget:init() gives precedence to .icon over .file.
-    -- Buttons created with icon="appbar.search" keep that name in .icon
-    -- after :new{}. Without this nil, init() ignores .file and resolves
-    -- the old symbolic name -- causing the search icon path to appear on
-    -- the up/back button after a reapply cycle.
-    btn.image.icon = nil
-    btn.image.file = path
-    pcall(btn.image.free, btn.image)
-    pcall(btn.image.init, btn.image)
-    return true
+    
+    local Config = require("sui_config")
+    local is_nerd = Config.isNerdIcon(path)
+    
+    -- IconButton stores self.image at self.horizontal_group[2] — that slot is
+    -- what HorizontalGroup actually paints. Setting btn[w_key] alone updates
+    -- the table field but leaves the render-tree slot pointing at the old widget.
+    -- This helper keeps both in sync, and also recalculates btn.dimen so that
+    -- IconButton:update() / initGesListener() use the right size.
+    local function _syncIconButtonSlot(w_key, new_w)
+        btn[w_key] = new_w
+        -- Sync the render-tree slot (horizontal_group[2]) so IconButton paints
+        -- the new widget and not the old one.
+        local hg = btn.horizontal_group
+        if hg and hg[2] and type(hg[2]) == "table"
+                and hg[2].paintTo and hg[2] ~= new_w then
+            hg[2] = new_w
+        end
+        -- Button render tree: btn.label_container[1] = btn.label_widget
+        -- Pagination chevrons are Button:new{icon=…}, NOT IconButton, so their
+        -- render slot is label_container[1]. Patch it so the new widget is
+        -- actually painted instead of the old one.
+        local lc = btn.label_container
+        if lc and lc[1] and type(lc[1]) == "table"
+                and lc[1].paintTo and lc[1] ~= new_w then
+            lc[1] = new_w
+        end
+        -- widgetInvert (called by IconButton:onTapIconButton for the flash_ui
+        -- highlight) uses `widget.dimen.w/h` when no explicit w/h are passed.
+        -- TextWidget only populates self.dimen lazily inside paintTo, so we
+        -- must force-compute the size now and store a Geom on the widget.
+        -- We use the button slot dimensions (w_width × w_height) rather than
+        -- the text's natural size, because that is what widgetInvert needs to
+        -- know in order to invert the correct screen area.
+        local w_width  = btn.width  or new_w.width  or 0
+        local w_height = btn.height or new_w.height or 0
+        -- Ensure the internal TextWidget size is computed (populates _length/_height).
+        pcall(new_w.getSize, new_w)
+        -- Give the widget a concrete dimen so widgetInvert never sees nil.
+        local Geom = require("ui/geometry")
+        new_w.dimen = Geom:new{ x = 0, y = 0, w = w_width, h = w_height }
+        -- Keep btn.dimen consistent (padding-aware).
+        if btn.dimen then
+            btn.dimen.w = w_width  + (btn.padding_left  or 0) + (btn.padding_right  or 0)
+            btn.dimen.h = w_height + (btn.padding_top   or 0) + (btn.padding_bottom or 0)
+        end
+    end
+
+    local function applyToWidget(w_key)
+        local w = btn[w_key]
+        if not w then return end
+
+        if is_nerd then
+            local nerd_char = Config.nerdIconChar(path)
+            local Font = require("ui/font")
+            local TextWidget = require("ui/widget/textwidget")
+
+            pcall(w.free, w)
+
+            local w_width  = btn.width  or w.width
+            local w_height = btn.height or w.height
+            local font_size = math.floor(math.min(w_width, w_height) * 0.65)
+
+            local new_w = TextWidget:new{
+                text    = nerd_char,
+                face    = Font:getFace(M.FACE_ICONS, font_size),
+                fgcolor = btn.icon_color or require("ffi/blitbuffer").COLOR_BLACK,
+                padding = 0,
+            }
+            new_w.width  = w_width
+            new_w.height = w_height
+            new_w.is_sui_wrapper = true
+
+            local orig_paintTo = new_w.paintTo
+            new_w.paintTo = function(self_w, bb, x, y)
+                local sz = self_w:getSize()
+                local ox = x + math.floor((w_width - sz.w) / 2)
+                local oy = y + math.floor((w_height - sz.h) / 2)
+                orig_paintTo(self_w, bb, ox, oy)
+            end
+
+            -- Sync btn[w_key] AND horizontal_group[2] so the render tree is consistent.
+            _syncIconButtonSlot(w_key, new_w)
+
+            local bb_mod = package.loaded["sui_bottombar"]
+            if bb_mod and bb_mod.patchDimmedIcon then
+                bb_mod.patchDimmedIcon(btn)
+            end
+        else
+            if w.is_sui_wrapper then
+                pcall(w.free, w)
+                local IconWidget = require("ui/widget/iconwidget")
+                local new_w = IconWidget:new{
+                    file   = path,
+                    width  = btn.width,
+                    height = btn.height,
+                }
+                -- Sync btn[w_key] AND horizontal_group[2].
+                _syncIconButtonSlot(w_key, new_w)
+
+                local bb_mod = package.loaded["sui_bottombar"]
+                if bb_mod and bb_mod.patchDimmedIcon then
+                    bb_mod.patchDimmedIcon(btn)
+                end
+            else
+                -- Mutate the existing widget in-place: object identity at
+                -- horizontal_group[2] is preserved, no slot sync needed.
+                w.icon = nil
+                w.file = path
+                pcall(w.free, w)
+                pcall(w.init, w)
+            end
+        end
+    end
+
+    if btn.image then
+        applyToWidget("image")
+        return true
+    elseif btn.label_widget then
+        applyToWidget("label_widget")
+        return true
+    end
+
+    return false
 end
 
 -- ---------------------------------------------------------------------------
@@ -327,35 +486,78 @@ end
 --   Both cases: set .icon = nil, .file = path, then :free() + :init().
 -- ---------------------------------------------------------------------------
 
+-- Restores a native button's image widget to a default icon/file, intelligently
+-- tearing down any SUI wrapper (like Nerd Fonts) that might be in its place.
+function M.restoreDefaultIcon(btn, default_icon, default_file)
+    if not btn then return end
+
+    -- Same render-tree sync as applyIconToBtn: when we replace btn[w_key] we
+    -- must also update horizontal_group[2], the slot IconButton actually paints.
+    local function _syncIconButtonSlot(w_key, new_w)
+        btn[w_key] = new_w
+        -- Sync the render-tree slot (horizontal_group[2]) so IconButton paints
+        -- the new widget and not the old one.
+        local hg = btn.horizontal_group
+        if hg and hg[2] and type(hg[2]) == "table"
+                and hg[2].paintTo and hg[2] ~= new_w then
+            hg[2] = new_w
+        end
+        -- widgetInvert (called by IconButton:onTapIconButton for the flash_ui
+        -- highlight) uses `widget.dimen.w/h` when no explicit w/h are passed.
+        -- TextWidget only populates self.dimen lazily inside paintTo, so we
+        -- must force-compute the size now and store a Geom on the widget.
+        -- We use the button slot dimensions (w_width × w_height) rather than
+        -- the text's natural size, because that is what widgetInvert needs to
+        -- know in order to invert the correct screen area.
+        local w_width  = btn.width  or new_w.width  or 0
+        local w_height = btn.height or new_w.height or 0
+        -- Ensure the internal TextWidget size is computed (populates _length/_height).
+        pcall(new_w.getSize, new_w)
+        -- Give the widget a concrete dimen so widgetInvert never sees nil.
+        local Geom = require("ui/geometry")
+        new_w.dimen = Geom:new{ x = 0, y = 0, w = w_width, h = w_height }
+        -- Keep btn.dimen consistent (padding-aware).
+        if btn.dimen then
+            btn.dimen.w = w_width  + (btn.padding_left  or 0) + (btn.padding_right  or 0)
+            btn.dimen.h = w_height + (btn.padding_top   or 0) + (btn.padding_bottom or 0)
+        end
+    end
+
+    local function applyToWidget(w_key)
+        local w = btn[w_key]
+        if not w then return end
+        if w.is_sui_wrapper then
+            pcall(w.free, w)
+            local IconWidget = require("ui/widget/iconwidget")
+            local new_w = IconWidget:new{
+                icon   = default_icon,
+                file   = default_file,
+                width  = btn.width,
+                height = btn.height,
+            }
+            _syncIconButtonSlot(w_key, new_w)
+        else
+            -- Mutate in-place: object identity at horizontal_group[2] is
+            -- preserved so no slot sync is needed.
+            w.icon = default_icon
+            if default_icon and default_icon ~= "" then
+                w.file = nil
+            else
+                w.file = default_file
+            end
+            pcall(w.free, w)
+            pcall(w.init, w)
+        end
+    end
+
+    if btn.image then applyToWidget("image")
+    elseif btn.label_widget then applyToWidget("label_widget")
+    end
+end
+
+-- Alias for internal compatibility
 local function _applyNativeBtn(id, btn)
-    local raw = M.getIcon(id)
-    if not raw then return false end
-    if not btn then return false end
-    local path = M.safeIconPath(raw, nil, id)
-    if not path then return false end
-
-    -- Path 1: IconButton exposes self.image (an IconWidget / ImageWidget).
-    if btn.image then
-        btn.image.icon = nil
-        btn.image.file = path
-        pcall(btn.image.free, btn.image)
-        pcall(btn.image.init, btn.image)
-        return true
-    end
-
-    -- Path 2: Plain Button{icon=…} stores its rendered icon in self.label_widget
-    -- (an IconWidget built by Button:init() when self.text is nil).
-    -- Patch the live label_widget directly: clear .icon so IconWidget:init()
-    -- skips the symbol-lookup branch, then set .file to our custom path.
-    if btn.label_widget then
-        btn.label_widget.icon = nil
-        btn.label_widget.file = path
-        pcall(btn.label_widget.free, btn.label_widget)
-        pcall(btn.label_widget.init, btn.label_widget)
-        return true
-    end
-
-    return false
+    return M.applyIconToBtn(id, btn)
 end
 
 -- ---------------------------------------------------------------------------
@@ -519,7 +721,6 @@ function M.makeMenuItems(plugin)
 local function _reapplyTitlebar()
         local ok_tb, TB = pcall(require, "sui_titlebar")
         if not ok_tb or not TB then return end
-        
         local fm = _fm()
         local ok_ui, UIManager = pcall(require, "ui/uimanager")
         pcall(TB.reapplyAll, fm, ok_ui and UIManager._window_stack or nil)
@@ -529,18 +730,41 @@ local function _reapplyTitlebar()
     local function _reapplyPaginationIcons()
         local ok_ui, UIManager = pcall(require, "ui/uimanager")
         if not ok_ui then return end
-        -- Apply to FM's FileChooser.
+
+        -- Collect every widget that has pagination buttons and apply icons now.
+        -- We must apply before nextTick so the widgets hold the new icon data
+        -- when the deferred setDirty fires.
+        local dirty_widgets = {}
+
         local fm = _fm()
         if fm and fm.file_chooser then
-            M.applyPaginationIcons(fm.file_chooser)
+            if M.applyPaginationIcons(fm.file_chooser) then
+                dirty_widgets[#dirty_widgets + 1] = fm.file_chooser
+            end
         end
+
         -- Apply to any fullscreen menu currently on the stack (History, etc.).
         for _, entry in ipairs(UIManager._window_stack or {}) do
             local w = entry.widget
             if w and w.page_info_left_chev then
-                M.applyPaginationIcons(w)
+                if M.applyPaginationIcons(w) then
+                    dirty_widgets[#dirty_widgets + 1] = w
+                end
             end
         end
+
+        if #dirty_widgets == 0 then return end
+
+        -- Defer setDirty to the next tick so it runs *after* UIManager:close()
+        -- has already finished its own _refresh() for the icon-picker dialog.
+        -- Without this, the picker's close-repaint races with ours and the
+        -- pagination bar may not reflect the new icon on screen.
+        -- This is the same pattern used by sui_titlebar for deferred repaints.
+        UIManager:nextTick(function()
+            for _, w in ipairs(dirty_widgets) do
+                UIManager:setDirty(w, "ui")
+            end
+        end)
     end
 
     -- Helper: reapply collections back icon on live collections widgets.
@@ -559,7 +783,7 @@ local function _reapplyTitlebar()
     local function _refresh(group)
         if group == "sui_titlebar" then
             _reapplyTitlebar()
-        elseif group == "pg_icons" then
+        elseif group == "pg_icons" or group == "sui_pager_icons" then
             _reapplyPaginationIcons()
         elseif group == "coll_icons" then
             _reapplyCollBackIcon()
@@ -625,7 +849,8 @@ local function _reapplyTitlebar()
                     end,
                     type(slot.label) == "function" and slot.label() or slot.label,
                     plugin,
-                    "_sysicon_picker_" .. slot.id
+                    "_sysicon_picker_" .. slot.id,
+                    true
                 )
             end,
         }
@@ -639,30 +864,7 @@ local function _reapplyTitlebar()
         text           = _("Reset All System Icons"),
         keep_menu_open = true,
         callback       = function()
-            M.resetAll()
-            _reapplyTitlebar()
-            -- Refresh browse-mode icons in the live FM titlebar.
-            local ok_tb, TB = pcall(require, "sui_titlebar")
-            if ok_tb and TB and TB.refreshBrowseIcons then
-                TB.refreshBrowseIcons(_fm())
-            end
-            -- Refresh pagination chevrons and collections back button.
-            _reapplyPaginationIcons()
-            _reapplyCollBackIcon()
-
-            -- Invalidate Quick Actions & Folder Covers caches
-            local ok_qa, QA2 = pcall(require, "sui_quickactions")
-            if ok_qa and QA2 and QA2.invalidateCustomQACache then QA2.invalidateCustomQACache() end
-            local ok_fc, FC = pcall(require, "sui_foldercovers")
-            if ok_fc and FC and FC.invalidateCache then FC.invalidateCache() end
-            local fm = _fm()
-            if fm and fm.file_chooser then
-                fm._navbar_suppress_path_change = true
-                fm.file_chooser:refreshPath()
-                fm._navbar_suppress_path_change = nil
-            end
-
-            if plugin then plugin:_rebuildAllNavbars() end
+            M.performResetAllSystemIcons(plugin)
         end,
         separator      = true,
     }
@@ -705,13 +907,6 @@ local function _reapplyTitlebar()
         end
     end
 
-    -- ── coll_icons group (collections back) ──────────────────────────────
-    for _, slot in ipairs(M.SLOTS) do
-        if slot.group == "sui_coll_icons" then
-            items[#items + 1] = _makeRow(slot)
-        end
-    end
-
     -- ── sui_fc_icons group ───────────────────────────────────────────────
     for _, slot in ipairs(M.SLOTS) do
         if slot.group == "sui_fc_icons" then
@@ -720,6 +915,313 @@ local function _reapplyTitlebar()
     end
 
     return items
+end
+
+function M.sui_build_system_icons(plugin, ctx_menu, ctx)
+    local Device = require("device")
+    local Screen = Device.screen
+    local FrameContainer = require("ui/widget/container/framecontainer")
+    local CenterContainer = require("ui/widget/container/centercontainer")
+    local ImageWidget = require("ui/widget/imagewidget")
+    local TextWidget = require("ui/widget/textwidget")
+    local IconWidget = require("ui/widget/iconwidget")
+    local Font = require("ui/font")
+    local Geom = require("ui/geometry")
+    
+    local btn_size = Screen:scaleBySize(36)
+    local icon_size = math.floor(btn_size * 0.7)
+    local border_sz = Screen:scaleBySize(1)
+    
+    local function makeIconPreview(icon_path, ko_native, fallback_label)
+        local icon_widget
+        local Config = require("sui_config")
+        local is_nerd = icon_path and Config.isNerdIcon(icon_path)
+        
+        if is_nerd then
+            local nerd_char = Config.nerdIconChar(icon_path)
+            if nerd_char then
+                icon_widget = TextWidget:new{
+                    text    = nerd_char,
+                    face    = Font:getFace(M.FACE_ICONS, math.floor(icon_size * 0.8)),
+                    fgcolor = Blitbuffer.COLOR_BLACK,
+                    padding = 0,
+                }
+            end
+        elseif icon_path and M.safeIconPath then
+            local safe_path = M.safeIconPath(icon_path, nil)
+            if safe_path then
+                local iw = ImageWidget:new{
+                    file    = safe_path,
+                    width   = icon_size,
+                    height  = icon_size,
+                    is_icon = true,
+                    alpha   = true,
+                }
+                if pcall(function() iw:_render() end) then
+                    icon_widget = iw
+                else
+                    iw:free()
+                end
+            end
+        end
+        
+        if not icon_widget and ko_native then
+            icon_widget = IconWidget:new{
+                icon    = ko_native,
+                width   = icon_size,
+                height  = icon_size,
+            }
+        end
+
+        if not icon_widget then
+            icon_widget = TextWidget:new{
+                text    = fallback_label and fallback_label:sub(1, 1):upper() or "?",
+                face    = Font:getFace("cfont", math.floor(icon_size * 0.7)),
+                fgcolor = Blitbuffer.COLOR_BLACK,
+            }
+        end
+        
+        return FrameContainer:new{
+            dimen      = Geom:new{ w = btn_size, h = btn_size },
+            radius     = Screen:scaleBySize(8),
+            bordersize = border_sz,
+            background = Blitbuffer.COLOR_WHITE,
+            color      = Blitbuffer.gray(0.75),
+            padding    = 0,
+            [1]        = CenterContainer:new{
+                dimen = Geom:new{ w = btn_size - border_sz * 2, h = btn_size - border_sz * 2 },
+                [1]   = icon_widget,
+            }
+        }
+    end
+
+    local function get_rows()
+        local rows = {}
+        local function addGroup(group_id, group_name)
+            local added_title = false
+            for _idx, slot in ipairs(M.SLOTS) do
+                if slot.group == group_id then
+                    if not added_title then
+                        rows[#rows + 1] = {
+                            text = group_name:upper(),
+                            is_divider = true,
+                            sui_build = function(ctx)
+                                return require("sui_window").SectionLabel{ text = group_name:upper(), inner_w = ctx.inner_w }
+                            end
+                        }
+                        added_title = true
+                    end
+                    
+                    local path = M.getIcon(slot.id)
+                    local label = type(slot.label) == "function" and slot.label() or slot.label
+                    
+                    local effective_path = path
+                    local ko_native = nil
+                    if not effective_path then
+                        if slot.default_ko and slot.default_ko:match("%.svg$") then
+                            local _plugin_dir = (debug.getinfo(1, "S").source:match("^@(.+/)[^/]+$") or "./")
+                            local lfs = require("libs/libkoreader-lfs")
+                            if lfs.attributes(_plugin_dir .. "/" .. slot.default_ko, "mode") == "file" then
+                                effective_path = _plugin_dir .. "/" .. slot.default_ko
+                            else
+                                ko_native = slot.default_ko
+                            end
+                        elseif slot.default_ko then
+                            ko_native = slot.default_ko
+                        end
+                    end
+                    
+                    rows[#rows + 1] = {
+                        text = label .. (path and "  \u{270E}" or ""),
+                        show_chevron = true,
+                        right_widget = makeIconPreview(effective_path, ko_native, label),
+                        on_hold = function() end,
+                        on_tap = function()
+                            local QA = require("sui_quickactions")
+                            QA.showIconPicker(path, function(new_path)
+                                local function _guardedSetIcon(ipath, on_valid)
+                                    if ipath == nil then on_valid(nil); return end
+                                    local safe = M.safeIconPath(ipath, nil)
+                                    if safe then on_valid(safe)
+                                    else
+                                        ctx_menu.UIManager:show(ctx_menu.InfoMessage:new{ text = _("Unsupported icon format.\nPlease use a PNG or SVG file."), timeout = 3 })
+                                    end
+                                end
+                                _guardedSetIcon(new_path, function(safe_path)
+                                    M.setIcon(slot.id, safe_path)
+                                    QA.invalidateCustomQACache()
+                                    plugin:_rebuildAllNavbars()
+                                    local HS = package.loaded["sui_homescreen"]
+                                    if HS and HS._instance then HS._instance:_refreshImmediate(false) end
+                                    -- Reapply titlebar icons and dirty the root widget so the
+                                    -- titlebar repaints in the same paint cycle as the bottombar.
+                                    -- Using setDirty on plugin.ui (the FM root) mirrors what
+                                    -- _rebuildAllNavbars does — no tick scheduling needed because
+                                    -- the SUIWindow is a child of this widget and is composited
+                                    -- together with it by the UIManager.
+                                    local ok_tb, TB = pcall(require, "sui_titlebar")
+                                    if ok_tb and TB then
+                                        local ok_ui, UIManager = pcall(require, "ui/uimanager")
+                                        pcall(TB.reapplyAll, plugin.ui,
+                                              ok_ui and UIManager._window_stack or nil)
+                                        if ok_ui and UIManager and plugin.ui then
+                                            UIManager:setDirty(plugin.ui, "ui")
+                                        end
+                                    end
+                                    ctx.repaint()
+                                end)
+                            end, label, plugin, "_sysicon_picker_" .. slot.id, true)
+                        end
+                    }
+                end
+            end
+        end
+
+        addGroup("sui_titlebar", _("Title Bar"))
+        addGroup("sui_browse_icons", _("Browse Icons"))
+        addGroup("sui_pager_icons", _("Pagination Bar"))
+        addGroup("sui_navpager_icons", _("Navpager"))
+        addGroup("sui_fc_icons", _("Folder Covers"))
+        return rows
+    end
+    
+    ctx_menu.show_row_page({
+        title = _("System Icons"),
+        items_func = get_rows,
+        footer_text = _("Reset All"),
+        footer_icon = "update",
+        footer_action = function(ctx2)
+            local ConfirmBox = require("ui/widget/confirmbox")
+            ctx_menu.UIManager:show(ConfirmBox:new{
+                text = _("Reset all system icons to default?"),
+                ok_text = _("Reset"),
+                cancel_text = _("Cancel"),
+                ok_callback = function()
+                    M.performResetAllSystemIcons(plugin)
+                    ctx2.repaint()
+                end,
+            })
+        end,
+    })
+end
+
+-- ---------------------------------------------------------------------------
+-- SUI Typographic Scale
+-- ---------------------------------------------------------------------------
+-- Five semantic font-size levels used across all SimpleUI modules.
+-- Change values only here — every module derives its sizes from these.
+--
+--  FS_TITLE    (22)  — primary title, placeholder, cover heading, dir label
+--  FS_SUBTITLE (20)  — subtitle, author name, large numeric value
+--  FS_BODY     (18)  — standard row text, quote body, section label
+--  FS_DETAIL   (15)  — metadata, percentages, collection labels, stats label
+--  FS_CAPTION  (12)  — minimum readable label, pagination xs, goal sub-label
+--
+--  Badge overlays (module_collections, sui_foldercovers) are calculated
+--  proportionally to their container size and intentionally bypass this scale.
+--
+--  Modules that have their own user-controlled scale factor (topbar, bottombar)
+--  multiply that factor on top, e.g.:
+--      math.floor(SUIStyle.FS_TITLE * _getTopbarScale())
+--
+--  _FS_SCALE is reserved for a future global "UI density" user setting.
+
+local _FS_SCALE = 1.0
+
+local function _fs(base)
+    return math.max(8, math.floor(base * _FS_SCALE))
+end
+
+M.FS_TITLE    = _fs(22)
+M.FS_SUBTITLE = _fs(20)
+M.FS_BODY     = _fs(18)
+M.FS_DETAIL   = _fs(15)
+M.FS_CAPTION  = _fs(12)
+
+-- Global border thickness for all frames and elements
+M.BORDER_SZ   = math.max(1, Screen:scaleBySize(1))
+
+-- Thinner border and specific color for library badges and book covers
+M.BADGE_BORDER_SZ  = require("ui/size").border.thin
+M.BADGE_BORDER_CLR = Blitbuffer.COLOR_GRAY
+
+-- ---------------------------------------------------------------------------
+-- SUI Font Face Aliases
+-- ---------------------------------------------------------------------------
+-- Semantic font-face tokens used across all SimpleUI modules.
+-- These are KOReader fontmap alias names passed to Font:getFace().
+-- They select the font *file*; the size always comes from FS_* above.
+-- Change values only here — every module derives its font faces from these.
+--
+--  FACE_REGULAR  — NotoSans-Regular: prose, labels, metadata, all general UI text.
+--
+--  FACE_BOLD     — NotoSans-Bold: emphasis, titles that need weight.
+--                  Use sparingly; most titles use FACE_REGULAR + bold=true.
+--
+--  FACE_MONO     — DroidSansMono: counters, numeric badges, file counts,
+--                  any value where fixed-width spacing matters.
+--  FACE_ICONS    — nerdfonts/symbols.ttf: glyph / icon codepoints (U+E000…).
+--
+-- NOTE: When the UI Font picker (_applyFont) rewrites Font.fontmap, it updates
+-- the KO slot names directly (e.g. "cfont", "tfont"). Because FACE_REGULAR and
+-- FACE_BOLD point to those same slots, all SUI widgets automatically inherit
+-- the user's chosen font with no extra work.
+
+M.FACE_REGULAR = "cfont"
+M.FACE_BOLD    = "tfont"
+M.FACE_MONO    = "infont"
+M.FACE_ICONS   = "symbols"
+
+-- ---------------------------------------------------------------------------
+-- SUI Icon Glyphs (Nerd Fonts / Material Symbols codepoints)
+-- ---------------------------------------------------------------------------
+-- Centraliza todos os glyphs usados na UI para eliminar Unicode espalhado.
+-- Uso: text = SUIStyle.icon("chevron")  →  "\u{E8CC}"
+-- Nunca usar os codepoints diretamente no código — usar sempre SUIStyle.icon().
+--
+-- Categorias:
+--   Navegação  — chevron, back, more
+--   Ações      — check, uncheck, delete, edit, add, drag
+--   Estado     — goal, stats
+
+M.ICON = {
+    -- Navegação
+    chevron  = "\u{F105}",   -- nf-fa-angle_right
+    back     = "\u{E5C4}",   -- arrow_back
+    more     = "\u{E8D7}",   -- more_horiz / três pontos (botão "…" do card)
+
+    -- Ações
+    check    = "\u{E832}",   -- check_box (checked)
+    uncheck  = "\u{E82F}",   -- check_box_outline_blank
+    delete   = "\u{F014}",   -- trash / delete (NerdFonts)
+    edit     = "\u{F040}",   -- pencil / edit (NerdFonts)
+    add      = "\u{E145}",   -- add / plus
+    drag     = "\u{E25D}",   -- drag_handle
+    arrow_up   = "\u{E75C}", -- arrow up (NerdFonts)
+    arrow_down = "\u{E744}", -- arrow down (NerdFonts)
+    move_page  = "\u{F0EC}", -- exchange / move
+    update     = "\u{E769}", -- update / sync
+
+    -- Estado / Conteúdo
+    goal     = "\u{E153}",   -- flag (objetivos de leitura)
+    stats    = "\u{E24B}",   -- bar_chart
+    clock    = "\u{E385}",
+    page     = "\u{F40E}",
+    book     = "\u{F401}",
+    calendar = "\u{F490}",
+    trophy   = "\u{EC3B}",
+    highlights = "\u{EE6B}",
+    notes    = "\u{EAEC}",
+    arrow_right = "\u{F178}",
+}
+
+--- Devolve o glyph do ícone com o nome `name`, ou "" se não existir.
+--- Uso: TextWidget:new{ text = SUIStyle.icon("chevron"), face = ... }
+---
+--- @param name string  chave de M.ICON
+--- @return string
+function M.icon(name)
+    return M.ICON[name] or ""
 end
 
 -- ---------------------------------------------------------------------------
@@ -986,6 +1488,8 @@ function M.makeFontMenuItems()
                     end
                     return label
                 end,
+                -- Hide this entry in SUIWindow until the custom-font toggle is on.
+                sui_hidden = function() return not _isEnabled() end,
                 -- Render the menu entry in that font face when supported.
                 font_func = Font and function(size)
                     local fd = _fonts[_name]
@@ -1063,6 +1567,8 @@ local _ROLE_KEYS = {
     text_secondary  = "simpleui_style_theme_text_secondary",
     separator       = "simpleui_style_theme_separator",
     accent          = "simpleui_style_theme_accent",
+    progress_bg     = "simpleui_style_theme_progress_bg",
+    progress_fg     = "simpleui_style_theme_progress_fg",
 }
 
 -- Fallback chain: if role has no value, try these roles in order.
@@ -1071,6 +1577,7 @@ local _FALLBACKS = {
     bottombar_fg = { "fg" },
     statusbar_bg = { "bg" },
     statusbar_fg = { "fg" },
+    progress_fg  = { "accent", "fg" },
 }
 
 -- In-memory cache: role → Blitbuffer color OR false ("tested, not set").
@@ -1185,7 +1692,7 @@ end
 -- ---------------------------------------------------------------------------
 local _PRESETS = {
     {
-        label = "Warm Paper",
+        label = _("Warm Paper"),
         colors = {
             bg             = "#F5F0E8",
             fg             = "#1A1008",
@@ -1199,7 +1706,7 @@ local _PRESETS = {
         },
     },
     {
-        label = "Dark Slate",
+        label = _("Dark Slate"),
         colors = {
             bg             = "#1C1C1E",
             fg             = "#E5E5EA",
@@ -1213,7 +1720,7 @@ local _PRESETS = {
         },
     },
     {
-        label = "Cool Mist",
+        label = _("Cool Mist"),
         colors = {
             bg             = "#EEF2F7",
             fg             = "#1C2B3A",
@@ -1227,7 +1734,7 @@ local _PRESETS = {
         },
     },
     {
-        label = "Sepia Classic",
+        label = _("Sepia Classic"),
         colors = {
             bg             = "#FAEBD7",
             fg             = "#3B2A1A",
@@ -1396,12 +1903,14 @@ end
 local _ACTION_SET = {
     library=true, homescreen=true, collections=true, history=true, continue=true,
     favorites=true, bookmark_browser=true, wifi_toggle=true, wifi_toggle_off=true, frontlight=true,
+    night_mode=true,
     stats_calendar=true, power=true, browse_authors=true, browse_series=true, browse_tags=true,
+    settings=true,
 }
 
 -- Maps icon-pack filename identifiers to internal action ids when they differ.
 -- "sui_action_library.svg" is the public icon name for the "home" (Library) action.
-local _ICON_ID_ALIAS = { library = "home" }
+local _ICON_ID_ALIAS = { library = "home", settings = "sui_settings" }
 
 local function _filenameToKey(fname)
     local stem = fname:match("^(.+)%.[^%.]+$") or fname

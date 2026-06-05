@@ -1,5 +1,6 @@
 -- module_clock.lua — Simple UI
 -- Clock module: clock always visible, with optional date and battery toggles.
+-- Supports "digital" (default) and "word" clock styles.
 
 local Blitbuffer      = require("ffi/blitbuffer")
 local CenterContainer = require("ui/widget/container/centercontainer")
@@ -8,6 +9,7 @@ local Device          = require("device")
 local Font            = require("ui/font")
 local FrameContainer  = require("ui/widget/container/framecontainer")
 local Geom            = require("ui/geometry")
+local TextBoxWidget   = require("ui/widget/textboxwidget")
 local TextWidget      = require("ui/widget/textwidget")
 local VerticalGroup   = require("ui/widget/verticalgroup")
 local VerticalSpan    = require("ui/widget/verticalspan")
@@ -18,6 +20,7 @@ local _ = require("sui_i18n").translate
 
 local UI           = require("sui_core")
 local UIManager    = require("ui/uimanager")
+local SUIStyle     = require("sui_style")
 local Config       = require("sui_config")
 local SUISettings = require("sui_store")
 local PAD          = UI.PAD
@@ -68,15 +71,20 @@ end
 -- Pixel constants — base values at 100% scale; scaled at render time.
 -- ---------------------------------------------------------------------------
 
-local _BASE_CLOCK_W       = Screen:scaleBySize(50)
-local _BASE_CLOCK_FS      = Screen:scaleBySize(44)
+local _BASE_CLOCK_W       = Screen:scaleBySize(70)
+local _BASE_CLOCK_FS      = 75  -- display clock — intentionally oversized, not part of type scale
 local _BASE_DATE_H        = Screen:scaleBySize(17)
 local _BASE_DATE_GAP      = Screen:scaleBySize(19)
-local _BASE_DATE_FS       = Screen:scaleBySize(11)
-local _BASE_BATT_FS       = Screen:scaleBySize(10)
+local _BASE_DATE_FS       = SUIStyle.FS_SUBTITLE  -- 20: date text
+local _BASE_BATT_FS       = SUIStyle.FS_BODY      -- 18: battery text
 local _BASE_BATT_H        = Screen:scaleBySize(15)
 local _BASE_BATT_GAP      = Screen:scaleBySize(19)
 local _BASE_BOT_PAD_EXTRA = Screen:scaleBySize(4)
+
+-- Word clock: font size for the hour line (minutes line inherits same size).
+-- Smaller than the digital clock because two lines need to fit in the same
+-- vertical budget (_BASE_CLOCK_W × 2, one line each).
+local _BASE_WORD_FS       = 50  -- intentionally oversized; scaled at render time
 
 -- ---------------------------------------------------------------------------
 -- Settings keys
@@ -88,8 +96,10 @@ local SETTING_BATTERY   = "clock_battery"    -- pfx .. "clock_battery"   (defaul
 local SETTING_DATE_GAP  = "clock_date_gap"   -- pfx .. "clock_date_gap"  (integer %, default 100)
 local SETTING_BATT_GAP  = "clock_batt_gap"   -- pfx .. "clock_batt_gap"  (integer %, default 100)
 local SETTING_ALIGN     = "clock_align"      -- pfx .. "clock_align"     (default "center")
+local SETTING_STYLE     = "clock_style"      -- pfx .. "clock_style"     ("digital"|"word", default "digital")
 
 local ALIGN_VALUES = { "left", "center", "right" }
+local STYLE_VALUES = { "digital", "word" }
 
 local function getAlignment(pfx)
     local v = SUISettings:readSetting(pfx .. SETTING_ALIGN)
@@ -105,6 +115,16 @@ local function alignLabel(align, _lc)
     if align == "left"  then return _lc("Left")  end
     if align == "right" then return _lc("Right") end
     return _lc("Center")
+end
+
+local function getClockStyle(pfx)
+    local v = SUISettings:readSetting(pfx .. SETTING_STYLE)
+    for _, s in ipairs(STYLE_VALUES) do if s == v then return v end end
+    return "digital"  -- default
+end
+
+local function setClockStyle(pfx, val)
+    SUISettings:saveSetting(pfx .. SETTING_STYLE, val)
 end
 
 local ELEM_GAP_MIN  = 0
@@ -141,6 +161,217 @@ end
 local function isBattEnabled(pfx)
     local v = SUISettings:readSetting(pfx .. SETTING_BATTERY)
     return v ~= false   -- default ON
+end
+
+-- ---------------------------------------------------------------------------
+-- Word clock — numeric time-to-words conversion
+-- ---------------------------------------------------------------------------
+--
+-- Converts a (hour, minute) pair to two lines of spelled-out numbers.
+-- Examples (12-hour mode, English defaults):
+--   12:00  → "Twelve\nO'Clock"
+--   12:05  → "Twelve\nOh Five"
+--   12:15  → "Twelve\nFifteen"
+--   12:30  → "Twelve\nThirty"
+--   12:50  → "Twelve\nFifty"
+--   12:21  → "Twelve\nTwenty-One"
+--
+-- Every word is individually wrapped in _() so translators get atomic
+-- units.  The tens-units separator is also a translatable string
+-- ("WORD_CLOCK_TENS_SEP") — it is "-" in English but " e " in Portuguese,
+-- allowing correct "Vinte e Um" vs "Twenty-One" without any code changes.
+--
+-- For 24-hour mode the hour table is extended to 0–23.  Hours 13–23 use the
+-- same words as 1–11 for simplicity (e.g. 14:00 → "Fourteen\nO'Clock"),
+-- which matches how people actually say 24h times in most languages.
+-- ---------------------------------------------------------------------------
+
+-- Units 1–19 (used for hours 1–12 / 13–19 and for minute values 1–19).
+-- Each string is a standalone translatable token.
+local _WORD_UNITS = {
+    [1]  = _("One"),
+    [2]  = _("Two"),
+    [3]  = _("Three"),
+    [4]  = _("Four"),
+    [5]  = _("Five"),
+    [6]  = _("Six"),
+    [7]  = _("Seven"),
+    [8]  = _("Eight"),
+    [9]  = _("Nine"),
+    [10] = _("Ten"),
+    [11] = _("Eleven"),
+    [12] = _("Twelve"),
+    [13] = _("Thirteen"),
+    [14] = _("Fourteen"),
+    [15] = _("Fifteen"),
+    [16] = _("Sixteen"),
+    [17] = _("Seventeen"),
+    [18] = _("Eighteen"),
+    [19] = _("Nineteen"),
+}
+
+-- Exact tens for minutes 20, 30, 40, 50.
+local _WORD_TENS = {
+    [2] = _("Twenty"),
+    [3] = _("Thirty"),
+    [4] = _("Forty"),
+    [5] = _("Fifty"),
+}
+
+-- Hour zero (midnight/noon special case — used in 24h mode for hour 0).
+local _WORD_MIDNIGHT = _("Midnight")
+local _WORD_NOON     = _("Noon")
+
+-- Special minute tokens.
+local _WORD_OCLOCK = _("O'Clock")
+local _WORD_OH     = _("Oh")        -- prefix for minutes 1–9 ("Oh Five")
+
+-- Separator between tens and units in compound minute strings.
+-- Translators replace this with the appropriate connector for their language:
+--   English  → "-"       → "Twenty-One"
+--   Portuguese → " e "   → "Vinte e Um"
+--   French   → "-"       → "Vingt-et-Un" (handled differently, but "-" works)
+local _WORD_TENS_SEP = _("WORD_CLOCK_TENS_SEP")
+
+-- Cached translated tables are rebuilt once per session (locale is fixed).
+-- We rebuild lazily on first call rather than at module load to guarantee
+-- that _() has already resolved the user's locale.
+local _wc_units_cache = nil
+local _wc_tens_cache  = nil
+local _wc_sep_cache   = nil
+
+local function _wcCache()
+    if _wc_units_cache then return end
+    _wc_units_cache = {
+        [1]  = _("One"),        [2]  = _("Two"),       [3]  = _("Three"),
+        [4]  = _("Four"),       [5]  = _("Five"),      [6]  = _("Six"),
+        [7]  = _("Seven"),      [8]  = _("Eight"),     [9]  = _("Nine"),
+        [10] = _("Ten"),        [11] = _("Eleven"),    [12] = _("Twelve"),
+        [13] = _("Thirteen"),   [14] = _("Fourteen"),  [15] = _("Fifteen"),
+        [16] = _("Sixteen"),    [17] = _("Seventeen"), [18] = _("Eighteen"),
+        [19] = _("Nineteen"),
+    }
+    _wc_tens_cache = {
+        [2] = _("Twenty"), [3] = _("Thirty"),
+        [4] = _("Forty"),  [5] = _("Fifty"),
+    }
+    -- Fallback to "-" if the translator left WORD_CLOCK_TENS_SEP untranslated.
+    local sep = _("WORD_CLOCK_TENS_SEP")
+    _wc_sep_cache = (sep == "WORD_CLOCK_TENS_SEP") and "-" or sep
+end
+
+-- Converts a minute value [0..59] to its word representation.
+-- Returns the translated minute string, or nil for :00 (caller adds O'Clock).
+local function _minToWords(min)
+    if min == 0 then return nil end
+    _wcCache()
+    if min < 10 then
+        -- "Oh Five", "Oh Nine"
+        return _("Oh") .. " " .. _wc_units_cache[min]
+    elseif min < 20 then
+        -- "Ten" … "Nineteen" — direct lookup
+        return _wc_units_cache[min]
+    else
+        local tens  = math.floor(min / 10)
+        local units = min % 10
+        if units == 0 then
+            return _wc_tens_cache[tens]
+        else
+            return _wc_tens_cache[tens] .. _wc_sep_cache .. _wc_units_cache[units]
+        end
+    end
+end
+
+-- Converts hour + minute to a two-line word-clock string.
+-- @param hour      number   0–23
+-- @param min       number   0–59
+-- @param is_12h    boolean  true = 12-hour display
+-- @return          string   e.g. "Twelve\nFifty" or "Twelve\nO'Clock"
+local function timeToWords(hour, min, is_12h)
+    _wcCache()
+
+    local h
+    if is_12h then
+        h = hour % 12
+        if h == 0 then h = 12 end
+    else
+        -- 24h: use 0–23 but map 0 to Midnight for readability.
+        h = hour
+    end
+
+    local hour_str
+    if h == 0 then
+        hour_str = _("Midnight")
+    elseif h == 12 and not is_12h then
+        -- In 24h mode, noon is special.
+        hour_str = _("Noon")
+    elseif _wc_units_cache[h] then
+        hour_str = _wc_units_cache[h]
+    else
+        -- Hours 20–23 in 24h mode — compose from tens+units.
+        local tens  = math.floor(h / 10)
+        local units = h % 10
+        if units == 0 then
+            hour_str = _wc_tens_cache[tens] or tostring(h)
+        else
+            hour_str = (_wc_tens_cache[tens] or "") .. _wc_sep_cache .. (_wc_units_cache[units] or tostring(units))
+        end
+    end
+
+    local min_str = _minToWords(min)
+    if min_str then
+        return hour_str .. "\n" .. min_str
+    else
+        return hour_str .. "\n" .. _("O'Clock")
+    end
+end
+
+-- ---------------------------------------------------------------------------
+-- Word clock widget builder
+--
+-- Returns a VerticalGroup containing two TextBoxWidget lines (hour + minutes)
+-- so that each line can be centred/aligned independently within inner_w.
+-- Using two separate widgets (rather than one multi-line TextBoxWidget) gives
+-- us reliable height control on e-ink devices, where multi-line TextBoxWidget
+-- getSize() sometimes reports incorrect heights before the first paint.
+-- ---------------------------------------------------------------------------
+
+local function _buildWordClockWidget(text, face, inner_w, align, theme_fg)
+    -- Split the "Hour\nMinutes" string into two parts.
+    local nl = text:find("\n")
+    local line1 = nl and text:sub(1, nl - 1) or text
+    local line2 = nl and text:sub(nl + 1)    or ""
+
+    local ContainerClass = CenterContainer
+    if align == "left"  then ContainerClass = LeftContainer  end
+    if align == "right" then ContainerClass = RightContainer end
+
+    -- Measure a single line height once.
+    local probe = TextWidget:new{ text = line1, face = face, bold = true }
+    local line_h = probe:getSize().h
+    probe:free()
+
+    local function makeLine(txt)
+        local wgt = UI.makeColoredText{
+            text    = txt,
+            face    = face,
+            bold    = true,
+            fgcolor = theme_fg,
+        }
+        if not wgt.dimen then wgt.dimen = wgt:getSize() end
+        return ContainerClass:new{
+            dimen = Geom:new{ w = inner_w, h = line_h },
+            wgt,
+        }
+    end
+
+    local vg = VerticalGroup:new{ align = align }
+    vg[1] = makeLine(line1)
+    if line2 ~= "" then
+        vg[2] = VerticalSpan:new{ width = math.floor(line_h * 0.10) }
+        vg[3] = makeLine(line2)
+    end
+    return vg
 end
 
 -- ---------------------------------------------------------------------------
@@ -200,6 +431,7 @@ local function build(w, pfx, vspan_pool)
     -- Scale all dimensions from base values.
     local clock_w       = math.floor(_BASE_CLOCK_W       * scale)
     local clock_fs      = math.max(10, math.floor(_BASE_CLOCK_FS  * scale))
+    local word_fs       = math.max(10, math.floor(_BASE_WORD_FS   * scale))
     local date_h        = math.max(8,  math.floor(_BASE_DATE_H    * scale))
     local date_gap      = math.max(0,  math.floor(_BASE_DATE_GAP  * scale * getDateGapPct(pfx) / 100))
     local batt_gap      = math.max(0,  math.floor(_BASE_BATT_GAP  * scale * getBattGapPct(pfx) / 100))
@@ -209,15 +441,15 @@ local function build(w, pfx, vspan_pool)
 
     local bot_pad_extra = math.floor(_BASE_BOT_PAD_EXTRA * scale)
 
-    local show_clock = isClockEnabled(pfx)
-    local show_date  = isDateEnabled(pfx)
-    local show_batt  = isBattEnabled(pfx)
-    local inner_w    = w - PAD * 2
+    local show_clock  = isClockEnabled(pfx)
+    local show_date   = isDateEnabled(pfx)
+    local show_batt   = isBattEnabled(pfx)
+    local clock_style = getClockStyle(pfx)
+    local inner_w     = w - PAD * 2
 
     -- Theme: when fg is set, use it for sub-text; otherwise fall back to CLR_TEXT_SUB.
-    local ok_ss, SUIStyle  = pcall(require, "sui_style")
-    local theme_fg         = ok_ss and SUIStyle and SUIStyle.getThemeColor("fg")
-    local theme_secondary  = ok_ss and SUIStyle and SUIStyle.getThemeColor("text_secondary")
+    local theme_fg         = SUIStyle.getThemeColor("fg")
+    local theme_secondary  = SUIStyle.getThemeColor("text_secondary")
     local sub_fg           = theme_secondary or theme_fg or CLR_TEXT_SUB
 
     local align = getAlignment(pfx)
@@ -234,15 +466,27 @@ local function build(w, pfx, vspan_pool)
 
     -- Clock
     if show_clock then
-        vg[#vg+1] = ContainerClass:new{
-            dimen = Geom:new{ w = inner_w, h = clock_w },
-            wrapText(UI.makeColoredText{
-                text    = datetime.secondsToHour(os.time(), G_reader_settings:isTrue("twelve_hour_clock")),
-                face    = Font:getFace("smallinfofont", clock_fs),
-                bold    = true,
-                fgcolor = theme_fg,   -- nil → KOReader default (black); honours theme palette
-            }),
-        }
+        if clock_style == "word" then
+            -- Word clock: two lines of text, each sized word_fs.
+            local is_12h = G_reader_settings:isTrue("twelve_hour_clock")
+            local t      = os.date("*t", os.time())
+            local wc_text = timeToWords(t.hour, t.min, is_12h)
+            local face    = Font:getFace(SUIStyle.FACE_REGULAR, word_fs)
+            -- Two lines × line_h each; use clock_w × 2 as the container budget.
+            local wc_widget = _buildWordClockWidget(wc_text, face, inner_w, align, theme_fg)
+            vg[#vg+1] = wc_widget
+        else
+            -- Digital clock (original behaviour).
+            vg[#vg+1] = ContainerClass:new{
+                dimen = Geom:new{ w = inner_w, h = clock_w },
+                wrapText(UI.makeColoredText{
+                    text    = datetime.secondsToHour(os.time(), G_reader_settings:isTrue("twelve_hour_clock")),
+                    face    = Font:getFace(SUIStyle.FACE_REGULAR, clock_fs),
+                    bold    = true,
+                    fgcolor = theme_fg,   -- nil → KOReader default (black); honours theme palette
+                }),
+            }
+        end
     end
 
     if show_date then
@@ -251,7 +495,7 @@ local function build(w, pfx, vspan_pool)
             dimen = Geom:new{ w = inner_w, h = date_h },
             wrapText(UI.makeColoredText{
                 text    = _localDate(),
-                face    = Font:getFace("smallinfofont", date_fs),
+                face    = Font:getFace(SUIStyle.FACE_REGULAR, date_fs),
                 fgcolor = sub_fg,
             }),
         }
@@ -264,7 +508,7 @@ local function build(w, pfx, vspan_pool)
             dimen = Geom:new{ w = inner_w, h = batt_h },
             wrapText(UI.makeColoredText{
                 text    = _battText(lvl, charging),
-                face    = Font:getFace("smallinfofont", batt_fs),
+                face    = Font:getFace(SUIStyle.FACE_REGULAR, batt_fs),
                 fgcolor = sub_fg,
             }),
         }
@@ -297,13 +541,17 @@ end
 
 function M.setEnabled(pfx, on)
     if not on then
-        SUISettings:saveSetting(pfx .. SETTING_ON, false)
-        SUISettings:saveSetting(pfx .. SETTING_DATE, false)
+        -- O módulo foi removido do layout: apaga todas as flags de visibilidade
+        -- para que um re-add futuro comece com defaults limpos.
+        SUISettings:saveSetting(pfx .. SETTING_ON,      false)
+        SUISettings:saveSetting(pfx .. SETTING_DATE,    false)
         SUISettings:saveSetting(pfx .. SETTING_BATTERY, false)
     else
+        -- O módulo está no layout: apenas activa o clock em si.
+        -- SETTING_DATE e SETTING_BATTERY NÃO são tocados — se já existem,
+        -- respeitam a preferência do utilizador; se são nil, isBattEnabled /
+        -- isDateEnabled usam os seus próprios defaults (ON para ambos).
         SUISettings:saveSetting(pfx .. SETTING_ON, true)
-        SUISettings:saveSetting(pfx .. SETTING_DATE, true)
-        SUISettings:saveSetting(pfx .. SETTING_BATTERY, true)
     end
 end
 
@@ -503,14 +751,23 @@ function M.getHeight(ctx)
     local batt_gap  = math.max(0, math.floor(_BASE_BATT_GAP * scale * getBattGapPct(ctx.pfx) / 100))
     local batt_h    = math.max(7, math.floor(_BASE_BATT_H   * scale))
 
-
     local h_base      = PAD * 2 + PAD2
     local show_clock  = isClockEnabled(ctx.pfx)
     local show_date   = isDateEnabled(ctx.pfx)
     local show_batt   = isBattEnabled(ctx.pfx)
 
+    -- Word clock occupies approximately two digital-clock lines.
+    -- Use 2 × clock_w as the budget so getHeight() stays stable regardless of
+    -- whether font metrics are available at estimation time.
+    local clock_h
+    if show_clock and getClockStyle(ctx.pfx) == "word" then
+        clock_h = clock_w * 2
+    else
+        clock_h = clock_w
+    end
+
     local h = h_base
-    if show_clock then h = h + clock_w end
+    if show_clock then h = h + clock_h end
     if show_date  then
         h = h + date_h
         if show_clock then h = h + date_gap end
@@ -536,6 +793,7 @@ local function _makeScaleItem(ctx_menu)
         refresh      = ctx_menu.refresh,
     })
 end
+
 function M.getMenuItems(ctx_menu)
     local pfx     = ctx_menu.pfx
     local refresh = ctx_menu.refresh
@@ -567,9 +825,31 @@ function M.getMenuItems(ctx_menu)
         },
         _makeScaleItem(ctx_menu),
         {
-            text_func = function()
-                return _lc("Alignment") .. " — " .. alignLabel(getAlignment(pfx), _lc)
+            -- Clock Style submenu: Digital / Word
+            text_func  = function() return _lc("Clock Style") end,
+            value_func = function()
+                return getClockStyle(pfx) == "word" and _lc("Word") or _lc("Digital")
             end,
+            sub_item_table = {
+                {
+                    text         = _lc("Digital") .. "  (12:50)",
+                    radio        = true,
+                    checked_func = function() return getClockStyle(pfx) == "digital" end,
+                    keep_menu_open = true,
+                    callback     = function() setClockStyle(pfx, "digital"); refresh() end,
+                },
+                {
+                    text         = _lc("Word") .. "  (Twelve Fifty)",
+                    radio        = true,
+                    checked_func = function() return getClockStyle(pfx) == "word" end,
+                    keep_menu_open = true,
+                    callback     = function() setClockStyle(pfx, "word"); refresh() end,
+                },
+            },
+        },
+        {
+            text_func  = function() return _lc("Alignment") end,
+            value_func = function() return alignLabel(getAlignment(pfx), _lc) end,
             separator      = true,
             sub_item_table = {
                 {
@@ -596,12 +876,8 @@ function M.getMenuItems(ctx_menu)
             },
         },
         {
-            text_func      = function()
-                local pct = getDateGapPct(pfx)
-                return pct == ELEM_GAP_DEF
-                    and _lc("Date Spacing")
-                    or  string.format("%s (%d%%)", _lc("Date Spacing"), pct)
-            end,
+            text_func      = function() return _lc("Date Spacing") end,
+            value_func     = function() return getDateGapPct(pfx) .. "%" end,
             enabled_func   = function() return isDateEnabled(pfx) end,
             keep_menu_open = true,
             callback       = function()
@@ -626,12 +902,8 @@ function M.getMenuItems(ctx_menu)
             end,
         },
         {
-            text_func      = function()
-                local pct = getBattGapPct(pfx)
-                return pct == ELEM_GAP_DEF
-                    and _lc("Battery Spacing")
-                    or  string.format("%s (%d%%)", _lc("Battery Spacing"), pct)
-            end,
+            text_func      = function() return _lc("Battery Spacing") end,
+            value_func     = function() return getBattGapPct(pfx) .. "%" end,
             enabled_func   = function() return isBattEnabled(pfx) end,
             keep_menu_open = true,
             callback       = function()

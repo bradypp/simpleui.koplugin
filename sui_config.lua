@@ -63,6 +63,7 @@ M.ICON = {
     history        = _P .. "history.svg",
     continue_      = _P .. "continue.svg",       -- trailing _ avoids clash with Lua keyword
     frontlight     = _P .. "frontlight.svg",
+    night          = _P .. "night.svg",
     stats          = _P .. "stats.svg",
     power          = _P .. "power.svg",
     plus_alt       = _P .. "plus_alt.svg",
@@ -99,7 +100,7 @@ M.MAX_LABEL_LEN          = 20
 M.MAX_CUSTOM_QA          = 24
 M.NAVPAGER_CENTER_TABS   = 4
 
-M.DEFAULT_TABS = { "home", "wifi_toggle", "homescreen", "history", "power" }
+M.DEFAULT_TABS = { "home", "sui_settings", "homescreen", "history", "power" }
 
 M.NON_HOME_DEFAULTS = {}
 for _i, id in ipairs(M.DEFAULT_TABS) do
@@ -117,8 +118,10 @@ M.ALL_ACTIONS = {
     { id = "bookmark_browser", label = _("Bookmarks"),        icon = M.ICON.ko_bookmark },
     { id = "wifi_toggle",      label = _("Wi-Fi"),            icon = M.ICON.ko_wifi_on  },
     { id = "frontlight",       label = _("Brightness"),       icon = M.ICON.frontlight  },
+    { id = "night_mode",       label = _("Night Mode"),       icon = M.ICON.night       },
     { id = "stats_calendar",   label = _("Stats"),            icon = M.ICON.stats       },
     { id = "power",            label = _("Power"),            icon = M.ICON.power       },
+    { id = "sui_settings",     label = _("Settings"),         icon = M.ICON.ko_settings },
     { id = "browse_authors",   label = _("Authors"),          icon = M.ICON.author,
       browsemeta_mode = "author" },
     { id = "browse_series",    label = _("Series"),           icon = M.ICON.series,
@@ -717,7 +720,9 @@ end
 local _BASE_LABEL_TEXT_H = nil
 function M.getScaledLabelH()
     if not _BASE_LABEL_TEXT_H then
-        _BASE_LABEL_TEXT_H = require("device").screen:scaleBySize(16)
+        local ok, SUIStyle = pcall(require, "sui_style")
+        local base_fs = (ok and SUIStyle and SUIStyle.FS_BODY) or 18  -- FS_BODY (18)
+        _BASE_LABEL_TEXT_H = require("device").screen:scaleBySize(base_fs)
     end
     local PAD2  = require("sui_core").PAD2
     local scale = M.getLabelScale()
@@ -789,6 +794,7 @@ function M.makeScaleItem(opts)
         text_func      = opts.text_func,
         separator      = opts.separator or nil,
         keep_menu_open = true,
+        value_func     = function() return opts.get() .. "%" end,
         callback       = function()
             if enabled_func and not enabled_func() then
                 local UIManager   = require("ui/uimanager")
@@ -869,6 +875,7 @@ function M.makeGapItem(opts)
         text_func      = opts.text_func,
         separator      = opts.separator or nil,
         keep_menu_open = true,
+        value_func     = function() return opts.get() .. "%" end,
         callback       = function()
             local SpinWidget = require("ui/widget/spinwidget")
             local UIManager  = require("ui/uimanager")
@@ -1192,6 +1199,23 @@ function M.getNavpagerState()
     local UI = package.loaded["sui_core"]
     if not UI then return false, false end
     local stack = UI.getWindowStack()
+    -- Check for a SUIWindow on top of the stack first.
+    -- SUIWindow._wrapper does NOT set covers_fullscreen (doing so would prevent
+    -- UIManager from repainting the FM/homescreen navbar below it, breaking
+    -- arrow color updates).  We detect it via the _sui_window_instance marker
+    -- before entering the covers_fullscreen loop.
+    for i = #stack, 1, -1 do
+        local w = stack[i] and stack[i].widget
+        if w and w._sui_window_instance then
+            local inst  = w._sui_window_instance
+            local cur   = inst._current_page or 1
+            local total = inst._total_pages  or 1
+            return cur > 1, cur < total
+        end
+        -- Stop scanning once we hit a fullscreen widget below (the SUIWindow,
+        -- if present, is always above it).
+        if w and w.covers_fullscreen then break end
+    end
     for i = #stack, 1, -1 do
         local w = stack[i] and stack[i].widget
         if w and w.covers_fullscreen then
@@ -1217,7 +1241,7 @@ end
 -- ===========================================================================
 
 function M.migrateOldCustomSlots()
-    if SUISettings:get("simpleui_cqa_migrated_v1") then return end
+    if SUISettings:get("simpleui_qa_migrated_v1") then return end
     local id_map, qa_list, qa_set = {}, M.getCustomQAList(), {}
     for _, id in ipairs(qa_list) do qa_set[id] = true end
     for slot = 1, 4 do
@@ -1254,66 +1278,105 @@ function M.migrateOldCustomSlots()
             end
         end
     end
-    SUISettings:set("simpleui_cqa_migrated_v1", true)
+    SUISettings:set("simpleui_qa_migrated_v1", true)
     local legacy_enabled = SUISettings:get("simpleui_bar_enabled")
     if legacy_enabled ~= nil and SUISettings:get("simpleui_enabled") == nil then
         SUISettings:set("simpleui_enabled", legacy_enabled)
     end
 end
 
--- First-run defaults. Idempotent: safe to call on every init.
+-- First-run defaults. Idempotent: each setting is only written when absent,
+-- so user customisations made after first run are never overwritten.
+-- No version flags needed — the nil-check on each key is the guard.
 function M.applyFirstRunDefaults()
-    if not SUISettings:get("simpleui_defaults_v1") then
-        SUISettings:set("simpleui_bar_enabled", true)
-        SUISettings:set("simpleui_topbar_enabled", true)
-        SUISettings:set("simpleui_bar_mode", "both")
-        SUISettings:set("simpleui_bar_size", "default")
-        SUISettings:set("simpleui_bar_tabs", { "home", "wifi_toggle", "homescreen", "history", "power" })
+    local function def(k, v)
+        if SUISettings:get(k) == nil then SUISettings:set(k, v) end
+    end
+    local function gdef(k, v)
+        if G_reader_settings:readSetting(k) == nil then
+            G_reader_settings:saveSetting(k, v)
+        end
+    end
+
+    -- Navbar
+    def("simpleui_bar_enabled",  true)
+    def("simpleui_topbar_enabled", true)
+    def("simpleui_bar_mode",     "both")
+    def("simpleui_bar_tabs",     { "home", "sui_settings", "homescreen", "history", "power" })
+    if SUISettings:get("simpleui_topbar_config") == nil then
         M.saveTopbarConfig({ side = { clock = "left", battery = "right", wifi = "right" }, order_left = { "clock" }, order_right = { "wifi", "battery" } })
-        local PFX = "simpleui_hs_"
-        SUISettings:set(PFX .. "quote_enabled", true)
-        SUISettings:set(PFX .. "currently", true)
-        SUISettings:set(PFX .. "recent", true)
-        SUISettings:set(PFX .. "clock_enabled", false)
-        SUISettings:set(PFX .. "clock_date", false)
-        SUISettings:set(PFX .. "clock_battery", false)
-        SUISettings:set(PFX .. "coverdeck", false)
-        SUISettings:set(PFX .. "new_books", false)
-        SUISettings:set(PFX .. "tbr", false)
-        SUISettings:set(PFX .. "collections", false)
-        SUISettings:set(PFX .. "reading_goals", false)
-        SUISettings:set(PFX .. "reading_stats_enabled", false)
-        SUISettings:set(PFX .. "quick_actions_1_enabled", false)
-        SUISettings:set(PFX .. "quick_actions_2_enabled", false)
-        SUISettings:set(PFX .. "quick_actions_3_enabled", false)
-        SUISettings:set(PFX .. "action_list_enabled", false)
-        SUISettings:set(PFX .. "module_order", { "quote", "currently", "recent", "clock", "coverdeck", "new_books", "tbr", "collections", "reading_goals", "reading_stats", "quick_actions_1", "quick_actions_2", "quick_actions_3", "action_list" })
-        SUISettings:set(PFX .. "currently_show_title", true)
-        SUISettings:set(PFX .. "currently_show_author", true)
-        SUISettings:set(PFX .. "currently_show_progress", true)
-        SUISettings:set(PFX .. "currently_show_percent", true)
-        SUISettings:set(PFX .. "currently_show_book_days", false)
-        SUISettings:set(PFX .. "currently_show_book_time", false)
-        SUISettings:set(PFX .. "currently_show_book_remaining", false)
-        SUISettings:set("simpleui_fc_enabled", true)
-        SUISettings:set("simpleui_fc_folder_style", "auto")
-        SUISettings:set("simpleui_fc_cover_mode", "2_3")
-        SUISettings:set("simpleui_fc_subfolder_cover", true)
-        SUISettings:set("simpleui_browsemeta_enabled", true)
-        G_reader_settings:saveSetting("start_with", "homescreen_simpleui")
-        SUISettings:set("simpleui_defaults_v1", true)
     end
-    if not SUISettings:get("simpleui_defaults_v2") then
-        SUISettings:set("simpleui_tb_item_fm_search", true)
-        SUISettings:set("simpleui_tb_fm_cfg", { side = { fm_menu = "right", fm_back = "left", fm_search = "left" }, order_left = { "fm_back", "fm_search" }, order_right = { "fm_menu" } })
-        SUISettings:set("simpleui_defaults_v2", true)
+
+    -- Homescreen modules (default preset)
+    local PFX = "simpleui_hs_"
+    def(PFX .. "quote_enabled",           true)
+    def(PFX .. "currently_enabled",       true)
+    def(PFX .. "recent_enabled",          true)
+    def(PFX .. "clock_enabled",           false)
+    def(PFX .. "clock_date",              false)
+    def(PFX .. "clock_battery",           false)
+    def(PFX .. "coverdeck_enabled",       false)
+    def(PFX .. "new_books_enabled",       false)
+    def(PFX .. "tbr_enabled",             false)
+    def(PFX .. "collections_enabled",     false)
+    def(PFX .. "reading_goals_enabled",   false)
+    def(PFX .. "reading_stats_enabled",   false)
+    def(PFX .. "action_list_enabled",     false)
+    def(PFX .. "module_order",            { "quote", "currently", "recent", "clock", "coverdeck", "new_books", "tbr", "collections", "reading_goals", "reading_stats", "quick_actions_row_000001", "quick_actions_row_000002", "quick_actions_row_000003", "action_list" })
+    def(PFX .. "currently_show_title",         true)
+    def(PFX .. "currently_show_author",        true)
+    def(PFX .. "currently_show_progress",      true)
+    def(PFX .. "currently_show_percent",       true)
+    def(PFX .. "currently_show_book_days",     false)
+    def(PFX .. "currently_show_book_time",     false)
+    def(PFX .. "currently_show_book_remaining", false)
+
+    -- Quick Actions Row instances (three stable ids that won't clash with
+    -- runtime-generated ones, which use os.time() as suffix).
+    if SUISettings:get("simpleui_qa_row_instances") == nil then
+        local QA_INSTANCES = { "quick_actions_row_000001", "quick_actions_row_000002", "quick_actions_row_000003" }
+        SUISettings:set("simpleui_qa_row_instances", QA_INSTANCES)
+        for _, iid in ipairs(QA_INSTANCES) do
+            def(PFX .. iid .. "_enabled", false)
+        end
     end
-    if not SUISettings:get("simpleui_defaults_v3") then
-        SUISettings:set("simpleui_browsemeta_enabled", true)
-        SUISettings:set("simpleui_tb_item_fm_browse", true)
-        SUISettings:set("simpleui_tb_fm_cfg", { side = { fm_menu = "right", fm_back = "left", fm_search = "left", fm_browse = "right" }, order_left = { "fm_back", "fm_search" }, order_right = { "fm_browse", "fm_menu" } })
-        SUISettings:set("simpleui_defaults_v3", true)
+
+    -- Reading Goals: only the annual goal shown by default.
+    def("simpleui_reading_goals_show_annual",  true)
+    def("simpleui_reading_goals_show_monthly", false)
+    def("simpleui_reading_goals_show_daily",   false)
+
+    -- Folder covers / browse meta
+    def("simpleui_fc_enabled",          true)
+    def("simpleui_fc_folder_style",     "auto")
+    def("simpleui_fc_cover_mode",       "2_3")
+    def("simpleui_fc_subfolder_cover",  true)
+    def("simpleui_browsemeta_enabled",  true)
+
+    -- Titlebar: search visible, browse visible left of menu
+    def("simpleui_tb_item_fm_search", true)
+    def("simpleui_tb_item_fm_browse", true)
+    if SUISettings:get("simpleui_tb_fm_cfg") == nil then
+        SUISettings:set("simpleui_tb_fm_cfg", {
+            side        = { fm_menu = "right", fm_back = "left", fm_search = "left", fm_browse = "right" },
+            order_left  = { "fm_back", "fm_search" },
+            order_right = { "fm_browse", "fm_menu" },
+        })
     end
+
+    -- Quick Settings bar
+    def("simpleui_qs_bar_enabled",          true)
+    def("simpleui_qs_bar_frontlight",       false)
+    def("simpleui_qs_bar_warmth",           false)
+    def("simpleui_qs_bar_shape",            "round")
+    def("simpleui_qs_bar_bg",              "flat")
+    def("simpleui_qs_bar_settings_on_hold", true)
+    def("simpleui_qs_bar_slots",            { "wifi_toggle", "bookmark_browser", "frontlight", "night_mode", "power", "sui_settings" })
+
+    -- KOReader global: open homescreen on launch (only set once on fresh install)
+    gdef("start_with", "homescreen_simpleui")
+
+    SUISettings:flush()
 end
 
 function M.reset()

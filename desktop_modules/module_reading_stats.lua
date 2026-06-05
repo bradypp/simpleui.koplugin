@@ -18,10 +18,12 @@ local UIManager       = require("ui/uimanager")
 local VerticalGroup   = require("ui/widget/verticalgroup")
 local Screen          = Device.screen
 local _ = require("sui_i18n").translate
+local N_ = require("sui_i18n").ngettext
 local Config          = require("sui_config")
 
 local UI      = require("sui_core")
 local SUISettings = require("sui_store")
+local SUIStyle    = require("sui_style")
 local CLR_TEXT_SUB = UI.CLR_TEXT_SUB
 local PAD     = UI.PAD
 local MOD_GAP = UI.MOD_GAP
@@ -33,10 +35,10 @@ local _CLR_CARD_BDR  = Blitbuffer.gray(0.72)
 local _BASE_RS_CORNER_R = Screen:scaleBySize(12)
 local _BASE_RS_GAP      = Screen:scaleBySize(12)
 local _BASE_RS_CARD_H   = Screen:scaleBySize(96)
-local _BASE_RS_VAL_FS   = Screen:scaleBySize(14)
-local _BASE_RS_LBL_FS   = Screen:scaleBySize(8)
+local _BASE_RS_VAL_FS   = SUIStyle.FS_TITLE     -- 22: stat value (large numeric)
+local _BASE_RS_LBL_FS   = SUIStyle.FS_DETAIL    -- 15: stat label
 local _BASE_RS_SEP_W    = Screen:scaleBySize(1)
-local _BASE_RS_PH_FS    = Screen:scaleBySize(11)  -- placeholder "No stats" text
+local _BASE_RS_PH_FS    = SUIStyle.FS_BODY      -- 18: placeholder text
 
 local RS_N_COLS    = 7  -- max columns — not a dimension, no scaling needed
 
@@ -51,6 +53,12 @@ local function getAlign(pfx)
     local v = SUISettings:readSetting(pfx .. SETTING_ALIGN)
     if v == "left" or v == "right" or v == "center" then return v end
     return "center"
+end
+
+local function _getItems(pfx)
+    local saved = SUISettings:readSetting((pfx or "simpleui_hs_") .. "reading_stats_items")
+    if type(saved) ~= "table" or #saved == 0 then return { "total_books", "today_time", "streak" } end
+    return saved
 end
 
 local function alignLabel(align)
@@ -74,15 +82,38 @@ end
 local STAT_MAP = {
     today_time  = { display_label = _("Today — Time"),      value = function(s) return fmtTime(s.today_secs) end,   label = _("of reading today") },
     today_pages = { display_label = _("Today — Pages"),     value = function(s) return tostring(s.today_pages) end, label = _("pages read today") },
+    week_time   = { display_label = _("This week — Time"),  value = function(s) return fmtTime(s.week_secs) end,    label = _("of reading this week") },
+    week_pages  = { display_label = _("This week — Pages"), value = function(s) return tostring(s.week_pages) end,  label = _("pages read this week") },
     avg_time    = { display_label = _("Daily avg — Time"),  value = function(s) return fmtTime(s.avg_secs) end,     label = _("daily avg (7 days)") },
     avg_pages   = { display_label = _("Daily avg — Pages"), value = function(s) return tostring(s.avg_pages) end,   label = _("pages/day (7 days)") },
+    month_time  = { display_label = _("This month — Time"), value = function(s) return fmtTime(s.month_secs) end,   label = _("of reading this month") },
+    month_pages = { display_label = _("This month — Pages"),value = function(s) return tostring(s.month_pages) end, label = _("pages read this month") },
     total_time  = { display_label = _("All time — Time"),   value = function(s) return fmtTime(s.total_secs) end,   label = _("of reading, all time") },
     total_books = { display_label = _("All time — Books"),  value = function(s) return tostring(s.total_books) end, label = _("books finished") },
     streak      = { display_label = _("Streak"),            value = function(s) return s.streak > 0 and tostring(s.streak) or "—" end,
                     label_fn = function(s) return s.streak == 1 and _("day streak") or (s.streak == 0 and _("no streak") or _("days streak")) end },
 }
 
-local STAT_POOL = { "today_time","today_pages","avg_time","avg_pages","total_time","total_books","streak" }
+local STAT_POOL = { "today_time","today_pages","week_time","week_pages","avg_time","avg_pages","month_time","month_pages","total_time","total_books","streak" }
+
+-- Maps each stat_id to the _changed category it belongs to (from SP.get()).
+-- Used by updateStats() to skip cards whose underlying data did not change.
+--   timeseries: all time/page counters updated by fetchTimeSeries
+--   streak:     streak value from fetchStreak (separate CTE)
+--   books:      books_year / books_total from the sidecar scan
+local STAT_CHANGED_CAT = {
+    today_time  = "timeseries",
+    today_pages = "timeseries",
+    week_time   = "timeseries",
+    week_pages  = "timeseries",
+    avg_time    = "timeseries",
+    avg_pages   = "timeseries",
+    month_time  = "timeseries",
+    month_pages = "timeseries",
+    total_time  = "timeseries",
+    streak      = "streak",
+    total_books = "books",
+}
 
 -- Pre-sort the pool alphabetically by display label — done once at module load,
 -- not on every menu open.
@@ -96,8 +127,6 @@ table.sort(_sorted_pool, function(a, b) return a.label:lower() < b.label:lower()
 -- Stat widget builders
 -- ---------------------------------------------------------------------------
 
--- Cards mode: rounded border, content aligned inside the card.
--- `d` is the scaled-dims table produced once per M.build() call.
 -- Streak value widget: icon (dark grey) + space + number (black), side by side.
 -- To change icon colour: edit _STREAK_ICON_CLR.
 -- To change spacing:     edit _STREAK_ICON_GAP.
@@ -122,91 +151,93 @@ local function makeStreakValWidget(val_str, d, clr_blk)
     }
 end
 
-local function buildStatCardWidget(card_w, stat_id, stats, d, align, colors, transparent)
+local function _buildCardInner(stat_id, stats, d, align, clr_blk, clr_sub, max_w)
     local entry = STAT_MAP[stat_id]
-    if not entry then return nil end
+    if not entry then return VerticalGroup:new{} end
     local val_str = entry.value(stats)
     local lbl_str = entry.label_fn and entry.label_fn(stats) or entry.label
+    local actual_max_w = max_w and math.max(1, max_w - Screen:scaleBySize(8)) or nil
+    return VerticalGroup:new{ align = align,
+        stat_id == "streak" and stats.streak >= 5
+            and makeStreakValWidget(val_str, d, clr_blk)
+            or  UI.makeColoredText{ 
+                    text = val_str, 
+                    face = d.face_val, 
+                    bold = true, 
+                    fgcolor = clr_blk,
+                    max_width = actual_max_w,
+                    truncate_with_ellipsis = true
+                },
+        UI.makeColoredText{
+            text    = lbl_str,
+            face    = d.face_lbl,
+            fgcolor = clr_sub,
+            max_width = actual_max_w,
+            truncate_with_ellipsis = true,
+        },
+    }
+end
+
+-- Cards mode: rounded border, content aligned inside the card.
+-- `d` is the scaled-dims table produced once per M.build() call.
+
+local function buildStatCardWidget(card_w, stat_id, stats, d, align, colors, transparent)
     local clr_blk = colors and colors.blk or _CLR_TEXT_BLK
     local clr_sub = colors and colors.sub or CLR_TEXT_SUB
-    return FrameContainer:new{
+    local cc = CenterContainer:new{
+        dimen = Geom:new{ w = card_w, h = d.card_h },
+        _buildCardInner(stat_id, stats, d, align, clr_blk, clr_sub, card_w),
+    }
+    local fc = FrameContainer:new{
         dimen      = Geom:new{ w = card_w, h = d.card_h },
-        bordersize = 1,
+        bordersize = SUIStyle.BORDER_SZ,
         color      = _CLR_CARD_BDR,
         background = not transparent and Blitbuffer.COLOR_WHITE or nil,
         radius     = d.corner_r,
         padding    = 0,
-        CenterContainer:new{
-            dimen = Geom:new{ w = card_w, h = d.card_h },
-            VerticalGroup:new{ align = align,
-                stat_id == "streak" and stats.streak >= 5
-                    and makeStreakValWidget(val_str, d, clr_blk)
-                    or  UI.makeColoredText{ text = val_str, face = d.face_val, bold = true, fgcolor = clr_blk },
-                UI.makeColoredText{
-                    text    = lbl_str,
-                    face    = d.face_lbl,
-                    fgcolor = clr_sub,
-                },
-            },
-        },
+        cc,
     }
+    local update_fn = function(new_stats)
+        cc[1] = _buildCardInner(stat_id, new_stats, d, align, clr_blk, clr_sub, card_w)
+    end
+    return fc, update_fn
 end
 
 -- Flat mode: no border, tinted background, content aligned.
 local _CLR_FLAT_BG = Blitbuffer.gray(0.08)
 local function buildStatFlatWidget(card_w, stat_id, stats, d, align, colors)
-    local entry = STAT_MAP[stat_id]
-    if not entry then return nil end
-    local val_str = entry.value(stats)
-    local lbl_str = entry.label_fn and entry.label_fn(stats) or entry.label
     local clr_blk = colors and colors.blk or _CLR_TEXT_BLK
     local clr_sub = colors and colors.sub or CLR_TEXT_SUB
-    return FrameContainer:new{
+    local cc = CenterContainer:new{
+        dimen = Geom:new{ w = card_w, h = d.card_h },
+        _buildCardInner(stat_id, stats, d, align, clr_blk, clr_sub, card_w),
+    }
+    local fc = FrameContainer:new{
         dimen      = Geom:new{ w = card_w, h = d.card_h },
         bordersize = 0,
         background = _CLR_FLAT_BG,
         radius     = d.corner_r,
         padding    = 0,
-        CenterContainer:new{
-            dimen = Geom:new{ w = card_w, h = d.card_h },
-            VerticalGroup:new{ align = align,
-                stat_id == "streak" and stats.streak >= 5
-                    and makeStreakValWidget(val_str, d, clr_blk)
-                    or  UI.makeColoredText{ text = val_str, face = d.face_val, bold = true, fgcolor = clr_blk },
-                UI.makeColoredText{
-                    text    = lbl_str,
-                    face    = d.face_lbl,
-                    fgcolor = clr_sub,
-                },
-            },
-        },
+        cc,
     }
+    local update_fn = function(new_stats)
+        cc[1] = _buildCardInner(stat_id, new_stats, d, align, clr_blk, clr_sub, card_w)
+    end
+    return fc, update_fn
 end
 local function buildStatListCell(cell_w, stat_id, stats, show_sep, d, align, colors)
-    local entry = STAT_MAP[stat_id]
-    if not entry then return nil end
-    local val_str = entry.value(stats)
-    local lbl_str = entry.label_fn and entry.label_fn(stats) or entry.label
     local clr_blk = colors and colors.blk or _CLR_TEXT_BLK
     local clr_sub = colors and colors.sub or CLR_TEXT_SUB
 
+    local cc = CenterContainer:new{
+        dimen = Geom:new{ w = cell_w, h = d.card_h },
+        _buildCardInner(stat_id, stats, d, align, clr_blk, clr_sub, cell_w),
+    }
     local card = FrameContainer:new{
         dimen      = Geom:new{ w = cell_w, h = d.card_h },
         bordersize = 0,
         padding    = 0,
-        CenterContainer:new{
-            dimen = Geom:new{ w = cell_w, h = d.card_h },
-            VerticalGroup:new{ align = align,
-                stat_id == "streak" and stats.streak >= 5
-                    and makeStreakValWidget(val_str, d, clr_blk)
-                    or  UI.makeColoredText{ text = val_str, face = d.face_val, bold = true, fgcolor = clr_blk },
-                UI.makeColoredText{
-                    text    = lbl_str,
-                    face    = d.face_lbl,
-                    fgcolor = clr_sub,
-                },
-            },
-        },
+        cc,
     }
 
     local og = OverlapGroup:new{
@@ -221,11 +252,20 @@ local function buildStatListCell(cell_w, stat_id, stats, show_sep, d, align, col
         sep.overlap_offset = { cell_w - d.sep_w, 0 }
         og[#og+1] = sep
     end
-    return og
+    local update_fn = function(new_stats)
+        cc[1] = _buildCardInner(stat_id, new_stats, d, align, clr_blk, clr_sub, cell_w)
+    end
+    return og, update_fn
 end
 
-local function openReaderProgress()
-    UIManager:broadcastEvent(require("ui/event"):new("ShowReaderProgress"))
+local function openReadingInsights()
+    local ok, SW = pcall(require, "sui_stats_windows")
+    if ok and SW and SW.showReadingInsightsWindow then
+        SW.showReadingInsightsWindow()
+    else
+        -- Fallback: open the built-in stats plugin if sui_stats_windows is unavailable.
+        UIManager:broadcastEvent(require("ui/event"):new("ShowReaderProgress"))
+    end
 end
 
 -- ---------------------------------------------------------------------------
@@ -248,12 +288,12 @@ function M.setEnabled(pfx, on)
 end
 
 function M.getCountLabel(pfx)
-    local n      = #(SUISettings:readSetting(pfx .. "reading_stats_items") or {})
+    local n      = #_getItems(pfx)
     local max_rs = M.MAX_ITEMS
     local rem    = max_rs - n
     if n == 0   then return nil end
-    if rem <= 0 then return string.format("(%d/%d — at limit)", n, max_rs) end
-    return string.format("(%d/%d — %d left)", n, max_rs, rem)
+    if rem <= 0 then return string.format(_("(%d/%d — at limit)"), n, max_rs) end
+    return string.format(N_("(%d/%d — %d left)", "(%d/%d — %d left)", rem), n, max_rs, rem)
 end
 
 function M.getStatLabel(id)
@@ -274,7 +314,7 @@ end
 
 function M.build(w, ctx)
     if not M.isEnabled(ctx.pfx) then return nil end
-    local stat_ids = SUISettings:readSetting(ctx.pfx .. "reading_stats_items") or {}
+    local stat_ids = _getItems(ctx.pfx)
 
     -- Compute all scaled dims once for this render pass.
     local scale     = Config.getModuleScale("reading_stats", ctx and ctx.pfx)
@@ -292,9 +332,9 @@ function M.build(w, ctx)
         ph_fs    = _ph_fs,
         -- Pre-resolved font faces — shared by all card builders, avoids
         -- repeated Font:getFace calls inside the per-card build loop.
-        face_val = Font:getFace("smallinfofont", _val_fs),
-        face_lbl = Font:getFace("cfont",         _lbl_fs),
-        face_ph  = Font:getFace("smallinfofont", _ph_fs),
+        face_val = Font:getFace(SUIStyle.FACE_REGULAR, _val_fs),
+        face_lbl = Font:getFace(SUIStyle.FACE_REGULAR,         _lbl_fs),
+        face_ph  = Font:getFace(SUIStyle.FACE_REGULAR, _ph_fs),
     }
 
     -- Theme: when fg is set use it for all text; otherwise fall back to module defaults.
@@ -306,10 +346,13 @@ function M.build(w, ctx)
 
     -- Show a placeholder when enabled but no stats have been selected yet.
     if #stat_ids == 0 then
+        local hold_on = SUISettings:nilOrTrue("simpleui_hs_settings_on_hold")
+        local ph_text = hold_on and _("No stats selected  —  long press to configure")
+                                 or _("No stats selected")
         return CenterContainer:new{
             dimen = Geom:new{ w = w, h = d.card_h },
             UI.makeColoredText{
-                text    = _("No stats selected"),
+                text    = ph_text,
                 face    = d.face_ph,
                 fgcolor = CLR_TEXT_SUB_EFF,
                 width   = w - PAD * 2,
@@ -324,8 +367,12 @@ function M.build(w, ctx)
     local stats = {
         today_secs  = sp.today_secs  or 0,
         today_pages = sp.today_pages or 0,
+        week_secs   = sp.week_secs   or 0,
+        week_pages  = sp.week_pages  or 0,
         avg_secs    = sp.avg_secs    or 0,
         avg_pages   = sp.avg_pages   or 0,
+        month_secs  = sp.month_secs  or 0,
+        month_pages = sp.month_pages or 0,
         total_secs  = sp.total_secs  or 0,
         total_books = sp.books_total or 0,
         streak      = sp.streak      or 0,
@@ -335,14 +382,17 @@ function M.build(w, ctx)
     local align = getAlign(ctx.pfx)
     local row    = HorizontalGroup:new{ align = "center" }
 
+    local update_funcs = {}
+
     if mode == "list" then
         local cell_w = math.floor(w / n)
         local colors = { blk = _CLR_TEXT_BLK_EFF, sub = CLR_TEXT_SUB_EFF }
         for i = 1, n do
-            local cell = buildStatListCell(cell_w, stat_ids[i], stats, i < n, d, align, colors)
-                      or OverlapGroup:new{
-                             dimen = Geom:new{ w = cell_w, h = d.card_h },
-                         }
+            local cell, update_fn = buildStatListCell(cell_w, stat_ids[i], stats, i < n, d, align, colors)
+            if not cell then
+                cell = OverlapGroup:new{ dimen = Geom:new{ w = cell_w, h = d.card_h } }
+            end
+            if update_fn then table.insert(update_funcs, { fn = update_fn, id = stat_ids[i] }) end
             row[#row+1] = cell
         end
 
@@ -360,27 +410,45 @@ function M.build(w, ctx)
         tappable.ges_events = {
             TapStatCard = { GestureRange:new{ ges = "tap", range = function() return tappable.dimen end } },
         }
-        function tappable:onTapStatCard() openReaderProgress(); return true end
+        function tappable:onTapStatCard(_, ges)
+            if ges and ges.pos and self.dimen then
+                local idx = math.floor((ges.pos.x - self.dimen.x) / cell_w) + 1
+                if idx >= 1 and idx <= n and stat_ids[idx] == "total_books" then
+                    local ok, SW = pcall(require, "sui_stats_windows")
+                    if ok and SW and SW.showFinishedBooksDialog then
+                        SW.showFinishedBooksDialog()
+                        return true
+                    end
+                    -- SW unavailable: fall through to insights as best-effort fallback
+                end
+            end
+            openReadingInsights()
+            return true
+        end
+        tappable._rs_update_funcs = update_funcs
         return tappable
     else
         -- Cards / Flat mode: rounded cards with gaps between them.
         -- "flat" = no border, tinted background; "cards" = bordered white.
         local avail_w = w - PAD * 2
         local card_w  = math.floor((avail_w - d.gap * (n - 1)) / n)
+        local row_w   = n * card_w + math.max(0, n - 1) * d.gap
+        local offset_x = math.floor((w - row_w) / 2)
         local colors  = { blk = _CLR_TEXT_BLK_EFF, sub = CLR_TEXT_SUB_EFF }
         for i = 1, n do
-            local card
+            local card, update_fn
             if mode == "flat" then
-                card = buildStatFlatWidget(card_w, stat_ids[i], stats, d, align, colors)
+                card, update_fn = buildStatFlatWidget(card_w, stat_ids[i], stats, d, align, colors)
             elseif mode == "cards_transparent" then
-                card = buildStatCardWidget(card_w, stat_ids[i], stats, d, align, colors, true)
+                card, update_fn = buildStatCardWidget(card_w, stat_ids[i], stats, d, align, colors, true)
             else
-                card = buildStatCardWidget(card_w, stat_ids[i], stats, d, align, colors, false)
+                card, update_fn = buildStatCardWidget(card_w, stat_ids[i], stats, d, align, colors, false)
             end
             card = card or FrameContainer:new{
                 dimen = Geom:new{ w = card_w, h = d.card_h },
                 bordersize = 0, padding = 0,
             }
+            if update_fn then table.insert(update_funcs, { fn = update_fn, id = stat_ids[i] }) end
             if i > 1 then row[#row+1] = HorizontalSpan:new{ width = d.gap } end
             row[#row+1] = card
         end
@@ -402,9 +470,70 @@ function M.build(w, ctx)
         tappable.ges_events = {
             TapStatCard = { GestureRange:new{ ges = "tap", range = function() return tappable.dimen end } },
         }
-        function tappable:onTapStatCard() openReaderProgress(); return true end
+        function tappable:onTapStatCard(_, ges)
+            if ges and ges.pos and self.dimen then
+                local dx = ges.pos.x - self.dimen.x - offset_x
+                if dx >= 0 then
+                    local step = card_w + d.gap
+                    local idx = math.floor(dx / step) + 1
+                    if idx >= 1 and idx <= n and (dx % step) <= card_w then
+                        if stat_ids[idx] == "total_books" then
+                            local ok, SW = pcall(require, "sui_stats_windows")
+                            if ok and SW and SW.showFinishedBooksDialog then
+                                SW.showFinishedBooksDialog()
+                                return true
+                            end
+                            -- SW unavailable: fall through to insights as best-effort fallback
+                        end
+                    end
+                end
+            end
+            openReadingInsights()
+            return true
+        end
+        tappable._rs_update_funcs = update_funcs
         return tappable
     end
+end
+
+function M.updateStats(widget, ctx)
+    if not widget or not widget._rs_update_funcs then return false end
+    local sp = ctx.stats or {}
+    -- _changed tells us which categories were actually re-fetched this cycle.
+    -- When absent (e.g. older SP version or SP.invalidate() full reset), treat
+    -- everything as changed so we don't silently skip any card.
+    local changed = sp._changed  -- may be nil
+    local stats = {
+        today_secs  = sp.today_secs  or 0,
+        today_pages = sp.today_pages or 0,
+        week_secs   = sp.week_secs   or 0,
+        week_pages  = sp.week_pages  or 0,
+        avg_secs    = sp.avg_secs    or 0,
+        avg_pages   = sp.avg_pages   or 0,
+        month_secs  = sp.month_secs  or 0,
+        month_pages = sp.month_pages or 0,
+        total_secs  = sp.total_secs  or 0,
+        total_books = sp.books_total or 0,
+        streak      = sp.streak      or 0,
+    }
+    local any_updated = false
+    for _, entry in ipairs(widget._rs_update_funcs) do
+        -- Skip this card if we know its category did not change this cycle.
+        if changed then
+            local cat = STAT_CHANGED_CAT[entry.id]
+            if cat and changed[cat] == false then
+                -- This field was preserved from cache — value is identical,
+                -- no need to rebuild the card's TextWidgets or mark it dirty.
+                goto continue
+            end
+        end
+        entry.fn(stats)
+        any_updated = true
+        ::continue::
+    end
+    -- Return true only if at least one card was actually updated, so the caller
+    -- can skip setDirty entirely when nothing changed.
+    return any_updated
 end
 
 function M.getHeight(_ctx)
@@ -437,7 +566,7 @@ function M.getMenuItems(ctx_menu)
     local items_key   = pfx .. "reading_stats_items"
     local MAX_RS      = M.MAX_ITEMS
 
-    local function getItems() return SUISettings:readSetting(items_key) or {} end
+    local function getItems() return _getItems(pfx) end
     local function isSelected(id)
         for _, v in ipairs(getItems()) do if v == id then return true end end; return false
     end
@@ -458,7 +587,122 @@ function M.getMenuItems(ctx_menu)
 
     local items = {
         {
-            text           = _lc("Type"),
+            text = _lc("Items"), keep_menu_open = true, separator = true,
+            callback = function()
+                local rs_ids = getItems()
+                if #rs_ids < 2 then
+                    _UIManager:show(InfoMessage:new{ text = _lc("Add at least 2 stats to arrange."), timeout = 2 }); return
+                end
+                local sort_items = {}
+                for _, id in ipairs(rs_ids) do
+                    sort_items[#sort_items+1] = { text = M.getStatLabel(id), orig_item = id }
+                end
+                local function on_save()
+                    local new_order = {}
+                    for _, item in ipairs(sort_items) do new_order[#new_order+1] = item.orig_item end
+                    SUISettings:saveSetting(items_key, new_order); refresh()
+                end
+                _UIManager:show(SortWidget:new{ title = _lc("Arrange Reading Stats"), covers_fullscreen = true,
+                    item_table = sort_items, callback = on_save })
+            end,
+            sui_build = ctx_menu.is_sui and function(ctx, _item)
+                local SUIWindow = require("sui_window")
+                return SUIWindow.ListRow{
+                    title        = _lc("Items"),
+                    subtitle     = function()
+                        local rs_ids = getItems()
+                        if #rs_ids == 0 then return _lc("No items selected.") end
+                        local names = {}
+                        for _, id in ipairs(rs_ids) do
+                            names[#names + 1] = M.getStatLabel(id)
+                        end
+                        return table.concat(names, "  ·  ")
+                    end,
+                    inner_w      = ctx.inner_w,
+                    item_count   = function() return #getItems() end,
+                    max_items    = M.MAX_ITEMS,
+                    show_chevron = true,
+                    on_tap       = function()
+                    local rs_ids = getItems()
+                    local sort_items = {}
+                    for _, id in ipairs(rs_ids) do
+                        sort_items[#sort_items+1] = { text = M.getStatLabel(id), orig_item = id }
+                    end
+                    
+                    ctx.push("arrange", {
+                            title = _lc("Items"),
+                        items = sort_items,
+                        empty_text = _lc("No items selected."),
+                            item_count = function() return #getItems() end,
+                            max_items  = M.MAX_ITEMS,
+                        on_delete = function(item) end,
+                        on_change = function(items_to_save)
+                            local new_order = {}
+                            for _, it in ipairs(items_to_save) do new_order[#new_order+1] = it.orig_item end
+                            SUISettings:saveSetting(items_key, new_order)
+                            refresh()
+                        end,
+                            footer_text = _lc("Add Item"),
+                            footer_action = function(ctx2)
+                                local picker_items = {}
+                                for _, entry in ipairs(_sorted_pool) do
+                                    if not isSelected(entry.id) then
+                                        local _id = entry.id
+                                        local _label = entry.label
+                                        picker_items[#picker_items + 1] = {
+                                            text   = _label,
+                                            on_tap = function(picker_ctx)
+                                                local cur = getItems()
+                                                if #cur >= MAX_RS then
+                                                    local InfoMessage = ctx_menu.InfoMessage or require("ui/widget/infomessage")
+                                                    local uim = ctx_menu.UIManager or require("ui/uimanager")
+                                                    local N_ = ctx_menu.N_ or require("sui_i18n").ngettext
+                                                    uim:show(InfoMessage:new{
+                                                        text = string.format(N_("The maximum of %d stat per row has been reached. Remove one first.",
+                                                               "The maximum of %d stats per row has been reached. Remove one first.", MAX_RS), MAX_RS), timeout = 2,
+                                                    })
+                                                    return
+                                                end
+                                                cur[#cur + 1] = _id
+                                                SUISettings:saveSetting(items_key, cur)
+                                                table.insert(sort_items, { text = _label, orig_item = _id })
+                                                refresh()
+                                                picker_ctx.pop()
+                                                ctx2.repaint()
+                                            end,
+                                        }
+                                    end
+                                end
+                                ctx2.push("item_picker", {
+                                    title = _lc("Add Item"),
+                                    items = picker_items,
+                                })
+                            end
+                        })
+                    end
+                }
+            end or nil,
+        },
+        _makeScaleItem(ctx_menu),
+        Config.makeScaleItem({
+            text_func     = function()
+                local pct = Config.getRSTextScalePct()
+                return pct == Config.RS_TEXT_SCALE_DEF
+                    and _lc("Text Size")
+                    or  string.format(_lc("Text Size — %d%%"), pct)
+            end,
+            title         = _lc("Text Size"),
+            info          = _lc("Size of the text inside the stat cards.\nDoes not affect card size or padding.\n100% is the default size."),
+            get           = function() return Config.getRSTextScalePct() end,
+            set           = function(pct) Config.setRSTextScalePct(pct) end,
+            refresh       = refresh,
+            value_min     = Config.RS_TEXT_SCALE_MIN,
+            value_max     = Config.RS_TEXT_SCALE_MAX,
+            value_step    = Config.RS_TEXT_SCALE_STEP,
+            default_value = Config.RS_TEXT_SCALE_DEF,
+        }),
+        {
+            text           = _lc("Style"),
             sub_item_table = {
                 {
                     text           = _lc("Cards"),
@@ -502,28 +746,9 @@ function M.getMenuItems(ctx_menu)
                 },
             },
         },
-        _makeScaleItem(ctx_menu),
-        Config.makeScaleItem({
-            text_func     = function()
-                local pct = Config.getRSTextScalePct()
-                return pct == Config.RS_TEXT_SCALE_DEF
-                    and _lc("Text Size")
-                    or  string.format(_lc("Text Size — %d%%"), pct)
-            end,
-            title         = _lc("Text Size"),
-            info          = _lc("Size of the text inside the stat cards.\nDoes not affect card size or padding.\n100% is the default size."),
-            get           = function() return Config.getRSTextScalePct() end,
-            set           = function(pct) Config.setRSTextScalePct(pct) end,
-            refresh       = ctx_menu.refresh,
-            value_min     = Config.RS_TEXT_SCALE_MIN,
-            value_max     = Config.RS_TEXT_SCALE_MAX,
-            value_step    = Config.RS_TEXT_SCALE_STEP,
-            default_value = Config.RS_TEXT_SCALE_DEF,
-        }),
         {
-            text_func      = function()
-                return _lc("Alignment") .. " — " .. alignLabel(getAlign(pfx))
-            end,
+            text_func  = function() return _lc("Alignment") end,
+            value_func = function() return alignLabel(getAlign(pfx)) end,
             sub_item_table = {
                 {
                     text           = _lc("Left"),
@@ -557,25 +782,8 @@ function M.getMenuItems(ctx_menu)
                 },
             },
         },
-        { text = _lc("Arrange"), keep_menu_open = true, separator = true, callback = function()
-            local rs_ids = getItems()
-            if #rs_ids < 2 then
-                _UIManager:show(InfoMessage:new{ text = _lc("Add at least 2 stats to arrange."), timeout = 2 }); return
-            end
-            local sort_items = {}
-            for _, id in ipairs(rs_ids) do
-                sort_items[#sort_items+1] = { text = M.getStatLabel(id), orig_item = id }
-            end
-            _UIManager:show(SortWidget:new{ title = _lc("Arrange Reading Stats"), covers_fullscreen = true,
-                item_table = sort_items, callback = function()
-                    local new_order = {}
-                    for _, item in ipairs(sort_items) do new_order[#new_order+1] = item.orig_item end
-                    SUISettings:saveSetting(items_key, new_order); refresh()
-                end })
-        end },
     }
 
-    -- Use pre-sorted pool (sorted once at module load, not per menu open).
     for _, entry in ipairs(_sorted_pool) do
         local _sid = entry.id; local _lbl = entry.label
         items[#items+1] = {
@@ -588,8 +796,39 @@ function M.getMenuItems(ctx_menu)
             checked_func   = function() return isSelected(_sid) end,
             keep_menu_open = true,
             callback       = function() toggleItem(_sid) end,
+            sui_hidden     = ctx_menu.is_sui or nil,
         }
     end
+
+    items[#items+1] = {
+        text           = _lc("Update Stats Now"),
+        separator      = true,
+        keep_menu_open = true,
+        callback       = function()
+            local SP = package.loaded["desktop_modules/module_stats_provider"]
+            if SP and SP.invalidate then SP.invalidate() end
+            local SH = package.loaded["desktop_modules/module_books_shared"]
+            if SH and SH.invalidateSidecarCache then SH.invalidateSidecarCache() end
+            local MC = package.loaded["desktop_modules/module_currently"]
+            if MC and MC.invalidateCache then MC.invalidateCache() end
+            local MCD = package.loaded["desktop_modules/module_coverdeck"]
+            if MCD and MCD.invalidateCache then MCD.invalidateCache() end
+            
+            local HS = package.loaded["sui_homescreen"]
+            if HS then
+                HS._cached_books_state = nil
+                HS._cfg_cache = nil
+                if HS._instance then
+                    HS._instance:_refreshImmediate(false)
+                end
+            end
+            if ctx_menu and type(ctx_menu.refresh) == "function" then ctx_menu.refresh() elseif refresh then refresh() end
+            local InfoMessage = ctx_menu and ctx_menu.InfoMessage or require("ui/widget/infomessage")
+            local UIM = ctx_menu and ctx_menu.UIManager or require("ui/uimanager")
+            UIM:show(InfoMessage:new{ text = _lc("Stats updated successfully."), timeout = 2 })
+        end,
+    }
+
     return items
 end
 

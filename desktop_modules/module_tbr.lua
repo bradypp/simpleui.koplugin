@@ -49,14 +49,15 @@ local function getSH()
     return _SH
 end
 
-local Config = require("sui_config")
-local UI     = require("sui_core")
+local Config      = require("sui_config")
+local UI          = require("sui_core")
 local SUISettings = require("sui_store")
+local SUIStyle    = require("sui_style")
 local PAD    = UI.PAD
 local Screen = require("device").screen
 
 local CLR_TEXT_SUB    = UI.CLR_TEXT_SUB
-local _BASE_RB_PCT_FS = Screen:scaleBySize(8)  -- "XX% Read" label font size — base value
+local _BASE_RB_PCT_FS = SUIStyle.FS_DETAIL  -- 15: "XX% Read" label font size
 
 local TBR_MAX       = 5
 local TBR_SETTING   = "simpleui_tbr_list"    -- G_reader_settings key (kept in sync)
@@ -255,7 +256,7 @@ local M = {}
 M.id          = "tbr"
 M.name        = _("To Be Read")
 M.label       = _("To Be Read")
-M.enabled_key = "tbr"
+M.enabled_key = "tbr_enabled"
 M.default_on  = false
 M.has_covers  = true   -- activates e-ink dithering and cover poll
 
@@ -333,7 +334,7 @@ function M.build(w, ctx)
     local ch      = D.RECENT_H
     local inner_w = w - PAD * 2
     local gap     = math.floor((inner_w - 5 * cw) / 4)
-    local pct_face = Font:getFace("smallinfofont", pct_fs)
+    local pct_face = Font:getFace(SUIStyle.FACE_REGULAR, pct_fs)
 
     local show_progress = showProgress(ctx.pfx)
     local show_text     = showText(ctx.pfx)
@@ -356,14 +357,17 @@ function M.build(w, ctx)
         if use_overlay then
             local pct_int = math.floor((bd.percent or 0) * 100 + 0.5)
             local badge_d = badge_r * 2
+            local border_sz = SUIStyle.BADGE_BORDER_SZ
+            local border_color = SUIStyle.BADGE_BORDER_CLR
             local badge = FrameContainer:new{
-                bordersize  = 0,
+                bordersize  = border_sz,
+                color       = border_color,
                 background  = Blitbuffer.gray(0.15),
                 padding     = 0,
                 dimen       = Geom:new{ w = badge_d, h = badge_d },
                 radius      = badge_r,
                 CenterContainer:new{
-                    dimen = Geom:new{ w = badge_d, h = badge_d },
+                    dimen = Geom:new{ w = badge_d - 2 * border_sz, h = badge_d - 2 * border_sz },
                     UI.makeColoredText{
                         text    = string.format(_("%d%%"), pct_int),
                         face    = pct_face,
@@ -389,7 +393,7 @@ function M.build(w, ctx)
 
         if draw_progress then
             cell[#cell+1] = SH.vspan(D.RB_GAP1, ctx.vspan_pool)
-            cell[#cell+1] = SH.progressBar(cw, bd.percent, D.RB_BAR_H)
+            cell[#cell+1] = UI.progressBar(cw, bd.percent, D.RB_BAR_H)
         end
 
         if draw_text then
@@ -449,7 +453,7 @@ function M.build(w, ctx)
     local show_frame = SUISettings:isTrue(ctx.pfx .. "tbr_show_frame")
     local solid_bg   = SUISettings:isTrue(ctx.pfx .. "tbr_solid_bg")
     local has_box    = show_frame or solid_bg
-    local border_sz  = show_frame and 1 or 0
+    local border_sz  = show_frame and SUIStyle.BORDER_SZ or 0
     local radius     = has_box and math.floor(Screen:scaleBySize(12) * scale) or 0
     local border_color = Blitbuffer.gray(0.72)
     if ok_ss and SUIStyle then
@@ -562,6 +566,173 @@ function M.getMenuItems(ctx_menu)
 
     local items = {}
 
+    items[#items + 1] = {
+        text = _lc("Arrange"),
+        sub_item_table_func = function()
+            local sub_items = {}
+            
+            sub_items[#sub_items + 1] = {
+                text         = _lc("Arrange To Be Read List"),
+                enabled_func = function() return getTBRCount() > 1 end,
+                keep_menu_open = true,
+                callback = function()
+                    local list = getTBRList()
+                    if #list < 2 then
+                        _UIManager:show(InfoMessage:new{
+                            text = _lc("Add at least 2 books to arrange."), timeout = 2 })
+                        return
+                    end
+                    local sort_items = {}
+                    for _, fp in ipairs(list) do
+                        sort_items[#sort_items + 1] = {
+                            text     = _getBookTitle(fp),
+                            filepath = fp,
+                            mandatory = "",
+                        }
+                    end
+                    local function on_save()
+                        local new_list = {}
+                        for _, item in ipairs(sort_items) do
+                            if item.filepath then
+                                new_list[#new_list + 1] = item.filepath
+                            end
+                        end
+                        local RC2 = getRC()
+                        if RC2 and RC2.coll[TBR_COLL_NAME] then
+                            local ordered = {}
+                            for _, fp in ipairs(new_list) do
+                                local entry = RC2.coll[TBR_COLL_NAME][fp]
+                                if entry then ordered[#ordered + 1] = entry end
+                            end
+                            RC2:updateCollectionOrder(TBR_COLL_NAME, ordered)
+                            RC2:write({ [TBR_COLL_NAME] = true })
+                        end
+                        _syncSettings(new_list)
+                        refresh()
+                    end
+                    _UIManager:show(SortWidget:new{ title = _lc("Arrange To Be Read List"), item_table = sort_items, covers_fullscreen = true, callback = on_save })
+                end,
+            }
+
+            sub_items[#sub_items + 1] = { text = _lc("To Be Read Books"), enabled = false, separator = true }
+
+            local list = getTBRList()
+            if #list == 0 then
+                sub_items[#sub_items + 1] = { text = _lc("No books in To Be Read list."), enabled = false }
+            else
+                for _, fp in ipairs(list) do
+                    local _fp    = fp
+                    local _title = _getBookTitle(fp)
+                    sub_items[#sub_items + 1] = {
+                        text           = _title,
+                        checked_func   = function() return isTBR(_fp) end,
+                        keep_menu_open = true,
+                        callback       = function()
+                            removeTBR(_fp)
+                            refresh()
+                        end,
+                    }
+                end
+            end
+
+            return sub_items
+        end,
+        sui_build = ctx_menu.is_sui and function(ctx, _item)
+            local SUIWindow = require("sui_window")
+            return SUIWindow.ListRow{
+                title        = _lc("Arrange"),
+                subtitle     = function()
+                    local list = getTBRList()
+                    if #list == 0 then return _lc("No books in To Be Read list.") end
+                    local names = {}
+                    for _, fp in ipairs(list) do
+                        names[#names + 1] = _getBookTitle(fp)
+                    end
+                    return table.concat(names, "  ·  ")
+                end,
+                inner_w      = ctx.inner_w,
+                show_chevron = true,
+                on_tap       = function()
+                    local list = getTBRList()
+                    local sort_items = {}
+                    for _, fp in ipairs(list) do
+                        sort_items[#sort_items + 1] = {
+                            text      = _getBookTitle(fp),
+                            orig_item = fp,
+                        }
+                    end
+                    
+                    ctx.push("nested_menu", {
+                        title = _lc("Arrange"),
+                        items_func = function()
+                            return {
+                                {
+                                    text = "Items List",
+                                    sui_build = function(ctx2)
+                                        local SUIWindow2 = require("sui_window")
+                                        local function save_order(items_to_save)
+                                            local new_list = {}
+                                            for _, it in ipairs(items_to_save) do
+                                                new_list[#new_list + 1] = it.orig_item
+                                            end
+                                            local RC2 = getRC()
+                                            if RC2 and RC2.coll[TBR_COLL_NAME] then
+                                                local ordered = {}
+                                                for _, fp in ipairs(new_list) do
+                                                    local entry = RC2.coll[TBR_COLL_NAME][fp]
+                                                    if entry then ordered[#ordered + 1] = entry end
+                                                end
+                                                RC2:updateCollectionOrder(TBR_COLL_NAME, ordered)
+                                                RC2:write({ [TBR_COLL_NAME] = true })
+                                            end
+                                            _syncSettings(new_list)
+                                        end
+                                        
+                                        local cards = {}
+                                        for i, item in ipairs(sort_items) do
+                                            local _i   = i
+                                            local _fp  = item.orig_item
+                                            cards[#cards + 1] = SUIWindow2.ArrangeCard{
+                                                inner_w      = ctx2.inner_w,
+                                                title        = item.text,
+                                                on_delete    = function()
+                                                    table.remove(sort_items, _i)
+                                                    removeTBR(_fp)
+                                                    ctx_menu.refresh()
+                                                    ctx2.repaint()
+                                                end,
+                                                on_move_up   = (_i > 1) and function()
+                                                    sort_items[_i], sort_items[_i-1] = sort_items[_i-1], sort_items[_i]
+                                                    save_order(sort_items)
+                                                    ctx_menu.refresh()
+                                                    ctx2.repaint()
+                                                end or nil,
+                                                on_move_down = (_i < #sort_items) and function()
+                                                    sort_items[_i], sort_items[_i+1] = sort_items[_i+1], sort_items[_i]
+                                                    save_order(sort_items)
+                                                    ctx_menu.refresh()
+                                                    ctx2.repaint()
+                                                end or nil,
+                                            }
+                                        end
+                                        
+                                        if #cards == 0 then
+                                            cards[#cards + 1] = SUIWindow2.ListRow{
+                                                title   = _lc("No books in To Be Read list."),
+                                                inner_w = ctx2.inner_w,
+                                            }
+                                        end
+                                        return cards
+                                    end
+                                }
+                            }
+                        end
+                    })
+                end
+            }
+        end or nil,
+    }
+
     items[#items + 1] = _makeScaleItem(ctx_menu)
     items[#items + 1] = Config.makeScaleItem({
         text_func = function() return _lc("Text Size") end,
@@ -571,6 +742,16 @@ function M.getMenuItems(ctx_menu)
         set       = function(v) Config.setItemLabelScale(v, "tbr", pfx) end,
         refresh   = refresh,
     })
+    items[#items + 1] = Config.makeScaleItem({
+        text_func = function() return _lc("Cover Size") end,
+        separator = true,
+        title     = _lc("Cover Size"),
+        info      = _lc("Scale for the cover thumbnails only.\nText and progress bar follow the module scale.\n100% is the default size."),
+        get       = function() return Config.getThumbScalePct("tbr", pfx) end,
+        set       = function(v) Config.setThumbScale(v, "tbr", pfx) end,
+        refresh   = refresh,
+    })
+
     items[#items + 1] = Config.makeLabelToggleItem("tbr", _("To Be Read"), refresh, _lc)
     items[#items + 1] = {
         text           = _lc("Frame"),
@@ -590,17 +771,8 @@ function M.getMenuItems(ctx_menu)
             refresh()
         end,
     }
-    items[#items + 1] = Config.makeScaleItem({
-        text_func = function() return _lc("Cover size") end,
-        separator = true,
-        title     = _lc("Cover size"),
-        info      = _lc("Scale for the cover thumbnails only.\nText and progress bar follow the module scale.\n100% is the default size."),
-        get       = function() return Config.getThumbScalePct("tbr", pfx) end,
-        set       = function(v) Config.setThumbScale(v, "tbr", pfx) end,
-        refresh   = refresh,
-    })
     items[#items + 1] = {
-        text           = _lc("Progress bar"),
+        text           = _lc("Progress Bar"),
         checked_func   = function() return showProgress(pfx) end,
         enabled_func   = function() return not showOverlay(pfx) end,
         keep_menu_open = true,
@@ -610,7 +782,7 @@ function M.getMenuItems(ctx_menu)
         end,
     }
     items[#items + 1] = {
-        text           = _lc("Percentage text"),
+        text           = _lc("Percentage Text"),
         checked_func   = function() return showText(pfx) end,
         enabled_func   = function() return not showOverlay(pfx) end,
         keep_menu_open = true,
@@ -620,7 +792,7 @@ function M.getMenuItems(ctx_menu)
         end,
     }
     items[#items + 1] = {
-        text           = _lc("Percentage overlay on cover"),
+        text           = _lc("Percentage Overlay on Cover"),
         checked_func   = function() return showOverlay(pfx) end,
         keep_menu_open = true,
         callback       = function()
@@ -628,78 +800,6 @@ function M.getMenuItems(ctx_menu)
             refresh()
         end,
     }
-
-    -- Arrange TBR list — SortWidget with covers_fullscreen, same as Collections.
-    items[#items + 1] = {
-        text         = _lc("Arrange To Be Read list"),
-        enabled_func = function() return getTBRCount() > 1 end,
-        keep_menu_open = true,
-        callback = function()
-            local list = getTBRList()
-            if #list < 2 then
-                _UIManager:show(InfoMessage:new{
-                    text = _lc("Add at least 2 books to arrange."), timeout = 2 })
-                return
-            end
-            local sort_items = {}
-            for _, fp in ipairs(list) do
-                sort_items[#sort_items + 1] = {
-                    text     = _getBookTitle(fp),
-                    filepath = fp,
-                    mandatory = "",
-                }
-            end
-            _UIManager:show(SortWidget:new{
-                title             = _lc("Arrange To Be Read list"),
-                item_table        = sort_items,
-                covers_fullscreen = true,
-                callback          = function()
-                    local new_list = {}
-                    for _, item in ipairs(sort_items) do
-                        if item.filepath then
-                            new_list[#new_list + 1] = item.filepath
-                        end
-                    end
-                    -- Persist new order into ReadCollection.
-                    local RC2 = getRC()
-                    if RC2 and RC2.coll[TBR_COLL_NAME] then
-                        local ordered = {}
-                        for _, fp in ipairs(new_list) do
-                            local entry = RC2.coll[TBR_COLL_NAME][fp]
-                            if entry then ordered[#ordered + 1] = entry end
-                        end
-                        RC2:updateCollectionOrder(TBR_COLL_NAME, ordered)
-                        RC2:write({ [TBR_COLL_NAME] = true })
-                    end
-                    _syncSettings(new_list)
-                    refresh()
-                end,
-            })
-        end,
-    }
-
-    -- Separator before book list (same visual pattern as Collections).
-    items[#items + 1] = { text = _lc("To Be Read books"), enabled = false, separator = true }
-
-    -- One checkbox entry per book in the TBR list.
-    local list = getTBRList()
-    if #list == 0 then
-        items[#items + 1] = { text = _lc("No books in To Be Read list."), enabled = false }
-    else
-        for _, fp in ipairs(list) do
-            local _fp    = fp
-            local _title = _getBookTitle(fp)
-            items[#items + 1] = {
-                text           = _title,
-                checked_func   = function() return isTBR(_fp) end,
-                keep_menu_open = true,
-                callback       = function()
-                    removeTBR(_fp)
-                    refresh()
-                end,
-            }
-        end
-    end
 
     return items
 end

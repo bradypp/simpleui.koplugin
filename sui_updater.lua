@@ -552,6 +552,15 @@ end
 --- • Never shows any UI — the result is written to G_reader_settings;
 ---   the banner is built by build_update_banner_item() when the menu opens.
 function M.scheduleAutoCheck()
+    -- Opt-in only: skip silently if the user has not enabled auto-check.
+    -- SUISettings:isTrue() returns false for missing keys → disabled by default.
+    local ok_s, SUISettings = pcall(require, "sui_settings")
+    if not ok_s or not SUISettings then return end
+    if not SUISettings:isTrue("simpleui_updater_auto_check") then
+        logger.dbg("simpleui updater: auto-check disabled — skipping")
+        return
+    end
+
     _load_persisted_state()
 
     local gs   = _gs()

@@ -52,7 +52,9 @@ M.MOD_GAP       = Screen:scaleBySize(23)   -- includes former LABEL_PAD_TOP (8px
 M.SIDE_PAD      = Screen:scaleBySize(14)
 M.LABEL_PAD_TOP = 0                         -- absorbed into MOD_GAP
 M.LABEL_PAD_BOT = M.PAD2                    -- padding_bottom of sectionLabel (was 4px, now 8px)
-M.LABEL_TEXT_H  = Screen:scaleBySize(16)    -- TextWidget height at SECTION_LABEL_SIZE
+local _ok_ss, _SUIStyle_core = pcall(require, "sui_style")
+local _body_fs = (_ok_ss and _SUIStyle_core and _SUIStyle_core.FS_BODY) or 18
+M.LABEL_TEXT_H  = Screen:scaleBySize(_body_fs)  -- TextWidget height for FS_BODY (18pt)
 M.LABEL_H       = M.LABEL_PAD_TOP + M.LABEL_PAD_BOT + M.LABEL_TEXT_H
 
 -- Shared secondary text colour used across all desktop modules.
@@ -216,26 +218,10 @@ function M.wrapWithNavbar(inner_widget, active_action_id, tabs, force_no_arrows)
     if navbar_on then
         local bar_y = screen_h - navbar_h
 
-        local sep_color = Bottombar.sepColor()
-        local sep_h     = Bottombar.SEP_H()
-        local top_sp    = Bottombar.TOP_SP()
-        local side_m    = Bottombar.SIDE_M()
-        local bars_transparent = SUISettings:isTrue("simpleui_navbar_transparent")
-        -- Separator line with the same lateral padding as the bar itself,
-        -- matching the original per-tab separator visual exactly.
-        local sep_line = LineWidget():new{
-            dimen      = Geom():new{ w = screen_w - side_m * 2, h = sep_h },
-            background = bars_transparent and nil or sep_color,
-        }
-        -- Bottom padding is absorbed into padding_bottom of the bar FrameContainer
-        -- itself (_buildBarContainer in sui_bottombar.lua). No separate bot_pad
-        -- element is needed — one fewer widget in the overlap stack.
-        sep_line.overlap_offset = { side_m, bar_y + top_sp - sep_h }
-        bar.overlap_offset      = { 0, bar_y + top_sp }
+        bar.overlap_offset      = { 0, bar_y }
 
-        overlap_items[2] = sep_line
-        overlap_items[3] = bar
-        bar_idx = 3
+        overlap_items[2] = bar
+        bar_idx = 2
     end
 
     if topbar_on then
@@ -245,7 +231,8 @@ function M.wrapWithNavbar(inner_widget, active_action_id, tabs, force_no_arrows)
 
     local topbar_idx       = topbar_on and #overlap_items or nil
     local navbar_container = OverlapGroup():new(overlap_items)
-    local wrapper_bg = (SUISettings:isTrue("simpleui_navbar_transparent") or SUISettings:isTrue("simpleui_statusbar_transparent")) and nil or Blitbuffer.COLOR_WHITE
+    local is_bare_bar = SUISettings:readSetting("simpleui_bar_style") == "bare"
+    local wrapper_bg = (SUISettings:isTrue("simpleui_navbar_transparent") or SUISettings:isTrue("simpleui_statusbar_transparent") or is_bare_bar) and nil or Blitbuffer.COLOR_WHITE
 
     return navbar_container,
            FrameContainer():new{
@@ -462,7 +449,7 @@ end
 -- Drop-in for TextWidget:new when you need fgcolor to work:
 --   local w = UI.makeColoredText{
 --       text    = "hello",
---       face    = Font:getFace("cfont", 12),
+--       face    = Font:getFace("cfont", SUIStyle.FS_CAPTION),
 --       bold    = true,
 --       fgcolor = Blitbuffer.COLOR_BLACK,  -- any colour
 --       width   = 200,                     -- optional, as with TextWidget
@@ -581,6 +568,8 @@ function M.makeAlphaTextBox(opts)
         justified   = opts.justified   or false,
         line_height = opts.line_height or 0.3,
         max_lines   = opts.max_lines,
+        height_adjust = opts.height_adjust,
+        height_overflow_show_ellipsis = opts.height_overflow_show_ellipsis,
         fgcolor     = Blitbuffer.COLOR_BLACK,
         bgcolor     = Blitbuffer.COLOR_WHITE,
         alpha       = true,
@@ -629,6 +618,58 @@ function M.makeAlphaTextBox(opts)
     function widget:onApplyTheme()      require("ui/uimanager"):setDirty(self) end
 
     return widget
+end
+
+-- ---------------------------------------------------------------------------
+-- Shared Progress Bar
+-- ---------------------------------------------------------------------------
+function M.progressBar(w, pct, bar_h, fg_color, bg_color)
+    bar_h = bar_h or Screen:scaleBySize(4)
+    
+    local ok, SUIStyle = pcall(require, "sui_style")
+    local style = SUISettings:get("simpleui_style_progress_bar_type") or "flat"
+
+    local bg = bg_color or (ok and SUIStyle.getThemeColor("progress_bg")) or Blitbuffer.gray(0.15)
+    local fg = fg_color or (ok and SUIStyle.getThemeColor("progress_fg")) or Blitbuffer.gray(0.75)
+    
+    if style == "framed" then
+        local border = ok and SUIStyle.BADGE_BORDER_SZ or 1
+        local border_color = Blitbuffer.COLOR_BLACK
+        local inner_w = math.max(0, w - 2 * border)
+        local inner_h = math.max(0, bar_h - 2 * border)
+        local fw = math.max(0, math.floor(inner_w * math.min(pct or 0, 1.0)))
+
+        local bg_frame = FrameContainer():new{
+            bordersize = border,
+            color      = border_color,
+            background = Blitbuffer.COLOR_WHITE,
+            padding    = 0, margin = 0,
+            LineWidget():new{ dimen = Geom():new{ w = inner_w, h = inner_h }, background = Blitbuffer.COLOR_WHITE }
+        }
+
+        if fw <= 0 then
+            return bg_frame
+        end
+
+        local fg_bar = LineWidget():new{ dimen = Geom():new{ w = fw, h = inner_h }, background = fg }
+        fg_bar.overlap_offset = { border, border }
+
+        return OverlapGroup():new{
+            dimen = Geom():new{ w = w, h = bar_h },
+            bg_frame,
+            fg_bar,
+        }
+    else
+        local fw = math.max(0, math.floor(w * math.min(pct or 0, 1.0)))
+        if fw <= 0 then
+            return LineWidget():new{ dimen = Geom():new{ w = w, h = bar_h }, background = bg }
+        end
+        return OverlapGroup():new{
+            dimen = Geom():new{ w = w, h = bar_h },
+            LineWidget():new{ dimen = Geom():new{ w = w,  h = bar_h }, background = bg },
+            LineWidget():new{ dimen = Geom():new{ w = fw, h = bar_h }, background = fg },
+        }
+    end
 end
 
 -- ---------------------------------------------------------------------------

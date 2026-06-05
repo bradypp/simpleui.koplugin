@@ -20,8 +20,9 @@ local Screen          = Device.screen
 local logger          = require("logger")
 local _ = require("sui_i18n").translate
 
-local Config = require("sui_config")
+local Config      = require("sui_config")
 local SUISettings = require("sui_store")
+local SUIStyle    = require("sui_style")
 
 local M = {}
 
@@ -33,20 +34,14 @@ local M = {}
 -- ---------------------------------------------------------------------------
 local function _getBarBg()
     if SUISettings:isTrue("simpleui_statusbar_transparent") then return nil end
-    local ok, SUIStyle = pcall(require, "sui_style")
-    if ok and SUIStyle then
-        local c = SUIStyle.getThemeColor("statusbar_bg")
-        if c then return c end
-    end
+    local c = SUIStyle.getThemeColor("statusbar_bg")
+    if c then return c end
     return Blitbuffer.COLOR_WHITE
 end
 
 local function _getBarFg()
-    local ok, SUIStyle = pcall(require, "sui_style")
-    if ok and SUIStyle then
-        local c = SUIStyle.getThemeColor("statusbar_fg")
-        if c then return c end
-    end
+    local c = SUIStyle.getThemeColor("statusbar_fg")
+    if c then return c end
     return Blitbuffer.COLOR_BLACK
 end
 
@@ -117,17 +112,17 @@ function M.TOPBAR_SIDE_M() return _cached("topbar_side_m", function() return M.S
 
 function M.TOPBAR_H()
     return _cached("topbar_h", function()
-        return math.floor(Screen:scaleBySize(18) * _getTopbarScale())
+        return math.floor(SUIStyle.FS_TITLE * _getTopbarScale())  -- 22: line height base (FS_TITLE)
     end)
 end
 function M.TOPBAR_FS()
     return _cached("topbar_fs", function()
-        return math.floor(Screen:scaleBySize(8) * _getTopbarScale())
+        return math.floor(SUIStyle.FS_BODY * _getTopbarScale())   -- 18: text size (FS_BODY)
     end)
 end
 function M.TOPBAR_CHEVRON_FS()
     return _cached("tb_chev_fs", function()
-        return math.floor(Screen:scaleBySize(22) * _getTopbarScale())
+        return math.floor(44 * _getTopbarScale())
     end)
 end
 function M.TOPBAR_PAD_TOP()
@@ -343,8 +338,8 @@ function M.buildTopbarWidget()
     local pad_top   = M.TOPBAR_PAD_TOP()
     local pad_bot   = M.TOPBAR_PAD_BOT()
     local total_h   = M.TOPBAR_H() + pad_top + pad_bot
-    local face      = Font:getFace("cfont", M.TOPBAR_FS())
-    local icon_face = Font:getFace("xx_smallinfofont", M.TOPBAR_FS())
+    local face      = Font:getFace(SUIStyle.FACE_REGULAR, M.TOPBAR_FS())
+    local icon_face = Font:getFace(SUIStyle.FACE_ICONS, M.TOPBAR_FS())
     local info      = M.getTopbarInfo()
     local tb_cfg    = getTopbarConfigCached()
 
@@ -468,10 +463,14 @@ function M.buildTopbarWidget()
     elseif show_swipe then
         center_w = CenterContainer:new{
             dimen = Geom:new{ w = inner_w, h = total_h },
-            TextWidget:new{
-                text    = "\xef\xb9\x80",
-                face    = Font:getFace("cfont", M.TOPBAR_CHEVRON_FS()),
-                fgcolor = _getBarFg(),
+            FrameContainer:new{
+                bordersize = 0, margin = 0, padding = 0,
+                padding_top = math.floor(Screen:scaleBySize(10) * _getTopbarScale()),
+                TextWidget:new{
+                    text    = "\xef\xb9\x80",
+                    face    = Font:getFace(SUIStyle.FACE_REGULAR, M.TOPBAR_CHEVRON_FS()),
+                    fgcolor = _getBarFg(),
+                },
             },
         }
     end
@@ -489,8 +488,43 @@ function M.buildTopbarWidget()
     }
 end
 
--- ---------------------------------------------------------------------------
--- Topbar touch zones
+local function _showTopbarSettingsWindow(plugin)
+    local SUIWindow = require("sui_window")
+
+    local function buildRoot(ctx)
+        if not plugin._makeTopbarMenu then plugin:addToMainMenu({}) end
+        local ctx_menu = SUIWindow.makeCtxMenu(ctx)
+        return SUIWindow.MenuTable{
+            items          = plugin._makeTopbarMenu(ctx_menu),
+            inner_w        = ctx.inner_w,
+            repaint        = function() ctx.repaint() end,
+            lock_overlay   = ctx.lockOverlay,
+            unlock_overlay = ctx.unlockOverlay,
+            push_stack     = function(id, params)
+                if type(id) == "string" then ctx.push(id, params) else ctx.push("nested_menu", params) end
+            end,
+            on_close       = function() end,
+        }
+    end
+
+    local function titleFn(ctx)
+        local cur = ctx.current()
+        local id  = cur and cur.id or "__root__"
+        if id == "nested_menu" then return cur.params.title or "" end
+        if id == "arrange"     then return cur.params.title or _("Arrange Items") end
+        return _("Top Bar")
+    end
+
+    local win = SUIWindow:new{
+        name           = "sui_win_context",
+        title          = titleFn,
+        screens        = SUIWindow.makeSettingsScreens(buildRoot),
+        navpager_mode  = Config.isNavpagerEnabled(),
+        position       = "bottom",
+        has_settings_btn = true,
+    }
+    win:show()
+end
 -- ---------------------------------------------------------------------------
 
 function M.registerTouchZones(plugin, fm_self)
@@ -524,15 +558,10 @@ function M.registerTouchZones(plugin, fm_self)
             ges         = "hold_release",
             screen_zone = topbar_zone,
             handler = function(_ges)
-			if not SUISettings:nilOrTrue("simpleui_topbar_settings_on_hold") then
-				return true
-			end
-			 if not plugin._makeTopbarMenu then plugin:addToMainMenu({}) end
-                local UI_mod    = require("sui_core")
-                local Bottombar = require("sui_bottombar")
-                -- Delegates to the shared implementation in ui.lua (#4).
-                UI_mod.showSettingsMenu(_("Top Bar"), plugin._makeTopbarMenu,
-                    M.TOTAL_TOP_H(), screen_h, Bottombar.TOTAL_H())
+                if not SUISettings:nilOrTrue("simpleui_topbar_settings_on_hold") then
+                    return true
+                end
+                _showTopbarSettingsWindow(plugin)
                 return true
             end,
         },

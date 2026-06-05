@@ -34,14 +34,15 @@ end
 
 local Config       = require("sui_config")
 local UI           = require("sui_core")
-local SUISettings = require("sui_store")
+local SUISettings  = require("sui_store")
+local SUIStyle     = require("sui_style")
 local PAD          = UI.PAD
 local PAD2         = UI.PAD2
 local MOD_GAP      = UI.MOD_GAP
 local LABEL_H      = UI.LABEL_H
 local CLR_TEXT_SUB = UI.CLR_TEXT_SUB
 
-local _BASE_RB_PCT_FS = Screen:scaleBySize(8)  -- "XX% Read" label font size — base value
+local _BASE_RB_PCT_FS = SUIStyle.FS_DETAIL  -- 15: "XX% Read" label font size
 
 local SETTING_PROGRESS      = "recent_show_progress"  -- pfx .. this; default ON
 local SETTING_TEXT          = "recent_show_text"       -- pfx .. this; default ON
@@ -67,7 +68,7 @@ local M = {}
 M.id          = "recent"
 M.name        = _("Recent Books")
 M.label       = _("Recent Books")
-M.enabled_key = "recent"
+M.enabled_key = "recent_enabled"
 M.default_on  = false
 M.has_covers  = true   -- activates e-ink dithering and cover poll
 M.is_book_mod = true   -- suppresses empty-state when active
@@ -101,7 +102,7 @@ function M.build(w, ctx)
     local inner_w = w - PAD * 2
     local gap     = math.floor((inner_w - 5 * cw) / 4)
     -- Hoist the face lookup — same args for every cell, no need to call per iteration.
-    local pct_face = Font:getFace("smallinfofont", pct_fs)
+    local pct_face = Font:getFace(SUIStyle.FACE_REGULAR, pct_fs)
 
     local show_progress = showProgress(ctx.pfx)
     local show_text     = showText(ctx.pfx)
@@ -129,14 +130,17 @@ function M.build(w, ctx)
         if use_overlay then
             local pct_int = math.floor((bd.percent or 0) * 100 + 0.5)
             local badge_d = badge_r * 2
+            local border_sz = SUIStyle.BADGE_BORDER_SZ
+            local border_color = SUIStyle.BADGE_BORDER_CLR
             local badge = FrameContainer:new{
-                bordersize  = 0,
+                bordersize  = border_sz,
+                color       = border_color,
                 background  = Blitbuffer.gray(0.15),
                 padding     = 0,
                 dimen       = Geom:new{ w = badge_d, h = badge_d },
                 radius      = badge_r,
                 CenterContainer:new{
-                    dimen = Geom:new{ w = badge_d, h = badge_d },
+                    dimen = Geom:new{ w = badge_d - 2 * border_sz, h = badge_d - 2 * border_sz },
                     UI.makeColoredText{
                         text    = string.format(_("%d%%"), pct_int),
                         face    = pct_face,
@@ -166,7 +170,7 @@ function M.build(w, ctx)
 
         if draw_progress then
             cell[#cell+1] = SH.vspan(D.RB_GAP1, ctx.vspan_pool)
-            cell[#cell+1] = SH.progressBar(cw, bd.percent, D.RB_BAR_H)
+            cell[#cell+1] = UI.progressBar(cw, bd.percent, D.RB_BAR_H)
         end
 
         if draw_text then
@@ -231,7 +235,7 @@ function M.build(w, ctx)
     local show_frame = SUISettings:isTrue(ctx.pfx .. "recent_show_frame")
     local solid_bg   = SUISettings:isTrue(ctx.pfx .. "recent_solid_bg")
     local has_box    = show_frame or solid_bg
-    local border_sz  = show_frame and 1 or 0
+    local border_sz  = show_frame and SUIStyle.BORDER_SZ or 0
     local radius     = has_box and math.floor(Screen:scaleBySize(12) * scale) or 0
     local border_color = Blitbuffer.gray(0.72)
     if ok_ss and SUIStyle then
@@ -340,6 +344,7 @@ function M.getMenuItems(ctx_menu)
     return {
         _makeScaleItem(ctx_menu),
         label_item,
+        _makeThumbScaleItem(ctx_menu),
         Config.makeLabelToggleItem("recent", _("Recent Books"), refresh, _lc),
         {
             text           = _lc("Frame"),
@@ -359,7 +364,6 @@ function M.getMenuItems(ctx_menu)
                 refresh()
             end,
         },
-        _makeThumbScaleItem(ctx_menu),
         {
             text           = _lc("Progress bar"),
             checked_func   = function() return showProgress(pfx) end,

@@ -17,6 +17,7 @@ local Config       = require("sui_config")
 local UI           = require("sui_core")
 local Bottombar    = require("sui_bottombar")
 local Topbar       = require("sui_topbar")
+local QSBar        = require("sui_quicksettings_bar")
 local Patches      = require("sui_patches")
 local SUISettings  = require("sui_store")
 
@@ -537,6 +538,190 @@ function SimpleUIPlugin:init()
             SUISettings:flush()
         end
         -- -------------------------------------------------------------------
+        -- Settings migration v6: namespace clean-up and key standardisation.
+        --
+        -- Changes applied:
+        --   1. Module enabled_key unification — bare module IDs (e.g. "currently",
+        --      "recent", "coverdeck", "tbr", "new_books", "collections",
+        --      "reading_goals") gain an explicit "_enabled" suffix to match the
+        --      convention already used by clock, reading_stats, action_list, etc.
+        --
+        --   2. module_coverdeck "flow_" prefix → "coverdeck_" prefix — the old
+        --      keys had no "simpleui_" namespace and risked collisions in the
+        --      shared G_reader_settings / SUISettings store.
+        --
+        --   3. simpleui_cqa_* → simpleui_qa_* — "cqa" was undocumented jargon;
+        --      "qa" matches the term used throughout the UI.  Also covers the
+        --      per-slot dynamic keys simpleui_cqa_{id} → simpleui_qa_{id}.
+        --
+        --   4. simpleui_collections_* → simpleui_coll_* — shorter, consistent
+        --      with the "fc_" brevity used by foldercovers.
+        --
+        --   5. simpleui_titlebar_custom → simpleui_tb_custom — aligns with the
+        --      tb_ alias used by all other titlebar keys.
+        --
+        --   6. simpleui_tb_size → simpleui_tb_size_pct — consistent with the
+        --      other size percentage keys (_bar_size_pct, _topbar_size_pct).
+        --
+        --   7. simpleui_bar_size (legacy enum "default"|"large") removed — this
+        --      key was only written by first-run defaults v1 and was never read
+        --      by any code path; the canonical value is simpleui_bar_size_pct.
+        --
+        -- Rules (identical to all previous migrations):
+        --   • Copy only when destination key is absent (never overwrite).
+        --   • Always delete the source key, even when copy is skipped.
+        --   • Whole block in pcall — a crash must not prevent plugin load.
+        --   • Guarded by simpleui_settings_migrated_v6.
+        -- -------------------------------------------------------------------
+        if not SUISettings:isTrue("simpleui_settings_migrated_v6") then
+            pcall(function()
+                local migrated = 0
+
+                -- ── Helper: rename a single key ───────────────────────────
+                local function _rename(old_k, new_k)
+                    local val = SUISettings:get(old_k)
+                    if val ~= nil then
+                        if SUISettings:get(new_k) == nil then
+                            SUISettings:set(new_k, val)
+                        end
+                        SUISettings:del(old_k)
+                        migrated = migrated + 1
+                    end
+                end
+
+                -- ── 1. Module enabled_key: add _enabled suffix ────────────
+                -- For each preset prefix that exists in SUISettings, rename
+                -- the bare module-id keys to module-id_enabled.
+                -- The only guaranteed preset prefix is "simpleui_hs_" but
+                -- user presets can have arbitrary prefixes — we scan all keys.
+                local bare_mods = {
+                    "currently", "recent", "coverdeck",
+                    "tbr", "new_books", "collections", "reading_goals",
+                }
+                -- Collect all unique prefixes that have at least one of the
+                -- bare keys so we don't have to hardcode "simpleui_hs_".
+                local prefixes_seen = {}
+                for k, _ in SUISettings:iterateKeys() do
+                    if type(k) == "string" then
+                        for _, mod_id in ipairs(bare_mods) do
+                            -- key must end exactly with the bare mod_id
+                            -- (no trailing chars) to avoid false matches
+                            local sfx = mod_id
+                            local klen, slen = #k, #sfx
+                            if klen > slen and k:sub(klen - slen + 1) == sfx
+                                    and k:sub(klen - slen) == "_" then
+                                local pfx = k:sub(1, klen - slen)
+                                prefixes_seen[pfx] = true
+                            end
+                        end
+                    end
+                end
+                for pfx in pairs(prefixes_seen) do
+                    for _, mod_id in ipairs(bare_mods) do
+                        _rename(pfx .. mod_id, pfx .. mod_id .. "_enabled")
+                    end
+                end
+
+                -- ── 2. module_coverdeck: flow_ → coverdeck_ ───────────────
+                -- These keys are prefixed with a homescreen preset prefix
+                -- (e.g. "simpleui_hs_") at runtime, so we scan all keys.
+                local flow_suffixes = {
+                    "flow_recent_source",
+                    "flow_stats_order",
+                    -- flow_show_{elem} keys are boolean per-element toggles;
+                    -- we catch them with the dynamic scan below.
+                }
+                local flow_pending = {}
+                for k, v in SUISettings:iterateKeys() do
+                    if type(k) == "string" then
+                        -- Fixed suffixes
+                        for _, sfx in ipairs(flow_suffixes) do
+                            if k:sub(- #sfx) == sfx then
+                                local pfx = k:sub(1, #k - #sfx)
+                                local new_sfx = sfx
+                                    :gsub("^flow_recent_source$", "coverdeck_source")
+                                    :gsub("^flow_stats_order$",   "coverdeck_stats_order")
+                                flow_pending[#flow_pending + 1] = {
+                                    old_k = k, new_k = pfx .. new_sfx, val = v
+                                }
+                                break
+                            end
+                        end
+                        -- Dynamic: flow_show_{anything} → coverdeck_show_{anything}
+                        local tail = k:match("_flow_show_(.+)$")
+                        if tail then
+                            local pfx = k:sub(1, #k - #("flow_show_" .. tail))
+                            flow_pending[#flow_pending + 1] = {
+                                old_k = k,
+                                new_k = pfx .. "coverdeck_show_" .. tail,
+                                val   = v,
+                            }
+                        end
+                    end
+                end
+                for _, e in ipairs(flow_pending) do
+                    if SUISettings:get(e.new_k) == nil then
+                        SUISettings:set(e.new_k, e.val)
+                    end
+                    SUISettings:del(e.old_k)
+                    migrated = migrated + 1
+                end
+
+                -- ── 3. simpleui_cqa_* → simpleui_qa_* ────────────────────
+                -- Covers: simpleui_cqa_list, simpleui_cqa_migrated_v1,
+                --         simpleui_cqa_custom_qa_{n}, simpleui_cqa_{id}
+                -- The migration-v3 target was "simpleui_cqa_*"; we now move
+                -- those to "simpleui_qa_*".
+                local cqa_pending = {}
+                for k, v in SUISettings:iterateKeys() do
+                    if type(k) == "string" and k:sub(1, 13) == "simpleui_cqa_" then
+                        cqa_pending[#cqa_pending + 1] = {
+                            old_k = k,
+                            new_k = "simpleui_qa_" .. k:sub(14),
+                            val   = v,
+                        }
+                    end
+                end
+                for _, e in ipairs(cqa_pending) do
+                    if SUISettings:get(e.new_k) == nil then
+                        SUISettings:set(e.new_k, e.val)
+                    end
+                    SUISettings:del(e.old_k)
+                    migrated = migrated + 1
+                end
+                -- Also fix the migration guard written by migrateOldCustomSlots.
+                _rename("simpleui_cqa_migrated_v1", "simpleui_qa_migrated_v1")
+
+                -- ── 4. simpleui_collections_* → simpleui_coll_* ──────────
+                local coll_renames = {
+                    { "simpleui_collections_list",           "simpleui_coll_list"           },
+                    { "simpleui_collections_covers",         "simpleui_coll_covers"         },
+                    { "simpleui_collections_badge_position", "simpleui_coll_badge_position" },
+                    { "simpleui_collections_badge_color",    "simpleui_coll_badge_color"    },
+                    { "simpleui_collections_badge_hidden",   "simpleui_coll_badge_hidden"   },
+                }
+                for _, pair in ipairs(coll_renames) do
+                    _rename(pair[1], pair[2])
+                end
+
+                -- ── 5. simpleui_titlebar_custom → simpleui_tb_custom ──────
+                _rename("simpleui_titlebar_custom", "simpleui_tb_custom")
+
+                -- ── 6. simpleui_tb_size → simpleui_tb_size_pct ───────────
+                _rename("simpleui_tb_size", "simpleui_tb_size_pct")
+
+                -- ── 7. Remove legacy simpleui_bar_size enum ───────────────
+                -- Never read by any code; only written by first-run defaults v1.
+                -- The canonical value is simpleui_bar_size_pct.
+                SUISettings:del("simpleui_bar_size")
+
+                SUISettings:flush()
+                logger.info("simpleui: settings migration v6 complete —", migrated, "keys renamed/removed")
+            end)
+            SUISettings:set("simpleui_settings_migrated_v6", true)
+            SUISettings:flush()
+        end
+        -- -------------------------------------------------------------------
 
         Config.applyFirstRunDefaults()
         Config.migrateOldCustomSlots()
@@ -578,179 +763,39 @@ function SimpleUIPlugin:init()
             title    = _("Simple UI: Toggle Homescreen / Library"),
             general  = true,
         })
+    Dispatcher:registerAction("simpleui_settings_window", {
+        category = "none",
+        event    = "SimpleUISettingsWindow",
+        title    = _("Simple UI: Settings"),
+        general  = true,
+    })
+
 
         -- -------------------------------------------------------------------
-        -- Icon registration: register the settings tab icon into KOReader's
-        -- icon system at plugin init time (eager, not lazy).
+        -- First-run bootstrap: ensure "Start with Homescreen" is active.
         --
-        -- This mirrors the approach used by Zen UI (common/inject_icons.lua):
-        --   1. Resolve plugin_root to an ABSOLUTE path.  On some KOReader
-        --      builds/devices debug.getinfo returns a relative source path
-        --      (e.g. "plugins/simpleui.koplugin/main.lua"); without the
-        --      lfs.currentdir() fix, every subsequent lfs.attributes() call
-        --      fails silently and all three icon-injection strategies in
-        --      sui_menu.lua are skipped, leaving the tab icon blank.
-        --   2. Copy the SVG to DataStorage/icons/ (persistent, survives
-        --      between sessions).  KOReader's ICONS_DIRS always includes
-        --      that directory, so the icon resolves even if the runtime
-        --      upvalue injection below fails (e.g. hardened builds).
-        --   3. Inject the resolved path into IconWidget's ICONS_PATH and
-        --      ICONS_DIRS upvalue caches so the icon is immediately available
-        --      in the current session without needing a restart.
-        --      Unlike sui_menu.lua's three-strategy approach, both caches are
-        --      populated in a single upvalue scan (matching Zen UI's method).
-        -- -------------------------------------------------------------------
-        do
-            -- Step 1: resolve plugin_root to an absolute path.
-            local src = debug.getinfo(1, "S").source or ""
-            local plugin_root = (src:sub(1, 1) == "@") and src:sub(2):match("^(.*)/[^/]+$") or nil
-            if plugin_root and plugin_root:sub(1, 1) ~= "/" then
-                local ok_lfs2, lfs2 = pcall(require, "libs/libkoreader-lfs")
-                local cwd = ok_lfs2 and lfs2 and lfs2.currentdir()
-                if cwd then plugin_root = cwd .. "/" .. plugin_root end
-            end
-
-            if plugin_root then
-                local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
-                if ok_lfs and lfs then
-                    local icon_src = plugin_root .. "/icons/settings.svg"
-                    if lfs.attributes(icon_src, "mode") == "file" then
-
-                        -- Step 2: copy to DataStorage/icons/simpleui_settings.svg
-                        -- so ICONS_DIRS disk lookup works even without upvalue injection.
-                        pcall(function()
-                            local DataStorage = require("datastorage")
-                            local ffiutil     = require("ffi/util")
-                            local user_dir    = DataStorage:getDataDir() .. "/icons"
-                            if lfs.attributes(user_dir, "mode") ~= "directory" then
-                                lfs.mkdir(user_dir)
-                            end
-                            local dst = user_dir .. "/simpleui_settings.svg"
-                            if lfs.attributes(dst, "mode") ~= "file" then
-                                ffiutil.copyFile(icon_src, dst)
-                            end
-                        end)
-
-                        -- Step 3: inject into IconWidget's runtime upvalue caches.
-                        -- Scan once, collect both ICONS_PATH and ICONS_DIRS together.
-                        pcall(function()
-                            local iw      = require("ui/widget/iconwidget")
-                            local iw_init = rawget(iw, "init")
-                            if type(iw_init) ~= "function" then return end
-                            local icons_path, icons_dirs
-                            for i = 1, 64 do
-                                local uname, uval = debug.getupvalue(iw_init, i)
-                                if uname == nil then break end
-                                if uname == "ICONS_PATH" and type(uval) == "table" then
-                                    icons_path = uval
-                                elseif uname == "ICONS_DIRS" and type(uval) == "table" then
-                                    icons_dirs = uval
-                                end
-                                if icons_path and icons_dirs then break end
-                            end
-                            if icons_path and not icons_path["simpleui_settings"] then
-                                icons_path["simpleui_settings"] = icon_src
-                            end
-                            if icons_dirs then
-                                local icons_subdir = plugin_root .. "/icons"
-                                local already = false
-                                for _, d in ipairs(icons_dirs) do
-                                    if d == icons_subdir then already = true; break end
-                                end
-                                if not already then
-                                    table.insert(icons_dirs, 1, icons_subdir)
-                                end
-                            end
-                        end)
-
-                    end
-                end
-            end
-        end
-        -- -------------------------------------------------------------------
-
-        -- -------------------------------------------------------------------
-        -- Tab injection: add a dedicated "Simple UI" tab to the KOReader menu
-        -- bar (both FileManager and Reader), positioned right after the
-        -- QuickSettings tab.  We patch setUpdateItemTable on the menu class
-        -- once — the flag __sui_tab_patched prevents double-patching on
-        -- subsequent plugin reloads within the same KOReader session.
-        -- This mirrors the approach used by Zen UI.
+        -- On a fresh install simpleui_onboarding_done is nil and start_with
+        -- has never been set to "homescreen_simpleui", so isStartWithHS()
+        -- would return false and the FM would open directly, bypassing the
+        -- homescreen entirely — meaning the onboarding window (which is
+        -- triggered inside Homescreen.show()) would never appear either.
         --
-        -- sui_menu is loaded lazily: the pre-bootstrap buildTabItems below
-        -- triggers require("sui_menu") on the first menu open, which registers
-        -- the icon and installs the real buildTabItems before the tab is built.
-        -- This removes sui_menu (and its lfs + IconWidget introspection) from
-        -- the critical startup path.
+        -- Fix: write start_with HERE, before Patches.installAll, so that
+        -- isStartWithHS() (lazily cached on first read in sui_patches.lua)
+        -- already sees the correct value when the setupLayout patch runs and
+        -- sets _hs_autoopen_pending = true.  From that point on, the normal
+        -- onShow → Homescreen.show() → Onboarding.show() chain handles
+        -- everything — no additional scheduling needed here.
         -- -------------------------------------------------------------------
-        do
-            -- Pre-bootstrap buildTabItems: installed now so setUpdateItemTable
-            -- always finds a callable.  On first call it loads sui_menu (which
-            -- replaces this function with the real cached version) and
-            -- delegates immediately to the real implementation.
-            if not rawget(SimpleUIPlugin, "buildTabItems") then
-                SimpleUIPlugin.buildTabItems = function(plugin_self)
-                    -- Trigger the full sui_menu load + installer.
-                    -- addToMainMenu is the bootstrap stub; calling it with a
-                    -- dummy table runs the installer, which replaces both
-                    -- addToMainMenu and buildTabItems on SimpleUIPlugin.
-                    plugin_self:addToMainMenu({})
-                    -- Delegate to the real buildTabItems now installed.
-                    local real = rawget(SimpleUIPlugin, "buildTabItems")
-                    if type(real) == "function" then
-                        return real(plugin_self)
-                    end
-                    return {}
-                end
-            end
-
-            local plugin_self = self
-
-            local function find_quicksettings_pos(tab_table)
-                for i, tab in ipairs(tab_table) do
-                    for _, field in ipairs({ "id", "name", "icon" }) do
-                        local v = tab[field]
-                        if type(v) == "string" then
-                            local norm = v:lower():gsub("[%s_%-]+", "")
-                            if norm == "quicksettings" then return i end
-                        end
-                    end
-                end
-                return nil
-            end
-
-            local function inject_sui_tab(menu_class)
-                if not menu_class or menu_class.__sui_tab_patched then return end
-                menu_class.__sui_tab_patched = true
-                local orig_sut = menu_class.setUpdateItemTable
-                menu_class.setUpdateItemTable = function(m_self)
-                    orig_sut(m_self)
-                    -- Respect the user's choice: default on (nilOrTrue), skip if explicitly false.
-                    if not SUISettings:nilOrTrue("simpleui_settings_tab_enabled") then return end
-                    if type(m_self.tab_item_table) ~= "table" then return end
-                    local build_fn = rawget(SimpleUIPlugin, "buildTabItems")
-                    if type(build_fn) ~= "function" then return end
-                    local ok, tab_items = pcall(build_fn, plugin_self)
-                    if not ok or type(tab_items) ~= "table" then return end
-                    -- Mirror exactly how Zen UI does it: set icon as a field on
-                    -- the items array itself (not a wrapper table), then insert
-                    -- that array directly into tab_item_table.
-                    tab_items.icon = "simpleui_settings"
-                    local qs_pos     = find_quicksettings_pos(m_self.tab_item_table)
-                    local insert_pos = qs_pos and (qs_pos + 1) or 1
-                    table.insert(m_self.tab_item_table, insert_pos, tab_items)
-                end
-            end
-
-            -- Inject the SUI tab only into FileManager (and HomeScreen), not into
-            -- the Reader menu. The SimpleUI settings tab should not appear while
-            -- a document is open.
-            local ok_fm, FileManagerMenu = pcall(require, "apps/filemanager/filemanagermenu")
-            if ok_fm and FileManagerMenu then inject_sui_tab(FileManagerMenu) end
+        local _sui_first_run = not SUISettings:get("simpleui_onboarding_done")
+        if _sui_first_run then
+            G_reader_settings:saveSetting("start_with", "homescreen_simpleui")
         end
-        -- -------------------------------------------------------------------
+
         if SUISettings:nilOrTrue("simpleui_enabled") then
             Patches.installAll(self)
+            
+            pcall(function() QSBar.install() end)
             -- Register the TBR button in the Library hold dialog (single book).
             -- addFileDialogButtons is the official KOReader API for this.
             -- The multi-selection button is injected via patchGetPlusDialogButtons
@@ -924,6 +969,56 @@ function SimpleUIPlugin:init()
                 end
             end)
 
+            -- Register the "Book statistics" button in the Library hold dialog.
+            -- Shown only for book files; opens a standalone per-book stats window.
+            UIManager:scheduleIn(0, function()
+                local ok_fm3, FM3 = pcall(require, "apps/filemanager/filemanager")
+                if not (ok_fm3 and FM3 and FM3.instance) then return end
+
+                local function _makeBookStatsRow(file, is_file, _book_props, close_cb)
+                    if not is_file then return nil end
+                    local ok_dr, DR = pcall(require, "document/documentregistry")
+                    local ok_bl, BL = pcall(require, "ui/widget/booklist")
+                    local is_book = (ok_dr and DR and DR:hasProvider(file))
+                        or (ok_bl and BL and BL.hasBookBeenOpened(file))
+                    if not is_book then return nil end
+                    return {{
+                        text = _("Book statistics"),
+                        callback = function()
+                            if close_cb then close_cb() end
+                            local ok_sw, SW = pcall(require, "sui_stats_windows")
+                            if ok_sw and SW then SW.showBookStatsFromFile(file) end
+                        end,
+                    }}
+                end
+
+                -- 1. Library browser (FileManager.showFileDialog).
+                FM3.instance:addFileDialogButtons("sui_book_stats", function(file, is_file, book_props)
+                    local close_cb = function()
+                        local fc3 = FM3.instance and FM3.instance.file_chooser
+                        local dlg = fc3 and fc3.file_dialog
+                        if dlg then UIManager:close(dlg) end
+                    end
+                    return _makeBookStatsRow(file, is_file, book_props, close_cb)
+                end)
+
+                -- 2. Search results (FileSearcher.onMenuHold).
+                -- The existing TBR monkey-patch on FS.onMenuHold already wraps
+                -- every row_func with a close_cb as the 4th argument, so our
+                -- factory receives it without any further patching needed.
+                local ok_fs3, FS3 = pcall(require, "apps/filemanager/filemanagerfilesearcher")
+                if ok_fs3 and FS3 then
+                    FS3.file_dialog_added_buttons = FS3.file_dialog_added_buttons or { index = {} }
+                    if FS3.file_dialog_added_buttons.index["sui_book_stats"] == nil then
+                        table.insert(FS3.file_dialog_added_buttons, function(file, is_file, book_props, close_cb)
+                            return _makeBookStatsRow(file, is_file, book_props, close_cb)
+                        end)
+                        FS3.file_dialog_added_buttons.index["sui_book_stats"] =
+                            #FS3.file_dialog_added_buttons
+                    end
+                end
+            end)
+
             if SUISettings:nilOrTrue("simpleui_topbar_enabled") then
                 Topbar.scheduleRefresh(self, 0)
             end
@@ -975,16 +1070,35 @@ function SimpleUIPlugin:init()
                             -- Guard prevents _buildCtx from reopening the connection
                             -- during the window between this call and the nextTick
                             -- sync.  Cleared two ticks later (after sync completes).
+                            --
+                            -- FIX: mirror the _db_sync_guard stuck-forever fix that was
+                            -- already applied to HomescreenWidget:onSyncBookStats.
+                            -- The original code gated the entire tick callback on
+                            --   Homescreen._instance == hs_ref
+                            -- If the homescreen instance was replaced between the guard
+                            -- being set and the tick firing (e.g. a tab switch during a
+                            -- Kobo sync cycle), the guard was never cleared on hs_ref and
+                            -- _buildCtx would never reopen the DB for the rest of the
+                            -- session.  Fix: always clear the guard on hs_ref; only gate
+                            -- _refresh() on the instance still being the current one.
+                            -- scheduleIn(10) is a safety-net for the edge case where tick
+                            -- callbacks are never invoked (UIManager teardown, hot reload).
                             hs._db_sync_guard = true
                             local hs_ref = hs
-                            UIManager:tickAfterNext(function()
-                                UIManager:nextTick(function()
-                                    if Homescreen._instance ~= hs_ref then return end
-                                    hs_ref._db_sync_guard = false
-                                    hs_ref._ctx_cache     = nil
+                            local cleared = false
+                            local function clearGuard()
+                                if cleared then return end
+                                cleared = true
+                                hs_ref._db_sync_guard = false
+                                hs_ref._ctx_cache     = nil
+                                if Homescreen._instance == hs_ref then
                                     hs_ref:_refresh(false)
-                                end)
+                                end
+                            end
+                            UIManager:tickAfterNext(function()
+                                UIManager:nextTick(clearGuard)
                             end)
+                            UIManager:scheduleIn(10, clearGuard)
                         end
                         return orig_onSyncBookStats(self_rs, ...)
                     end
@@ -1005,6 +1119,8 @@ local _PLUGIN_MODULES = {
     "sui_patches", "sui_menu", "sui_titlebar", "sui_quickactions",
     "sui_homescreen", "sui_foldercovers", "sui_browsemeta", "sui_updater",
     "sui_store", "sui_presets", "sui_style",
+    "sui_settings_window",
+    "sui_quicksettings_bar",
     "desktop_modules/moduleregistry",
     "desktop_modules/module_books_shared",
     "desktop_modules/module_clock",
@@ -1077,6 +1193,12 @@ function SimpleUIPlugin:onSimpleUIToggleHomeLibrary()
     return true
 end
 
+function SimpleUIPlugin:onSimpleUISettingsWindow()
+    local SettingsWindow = require("sui_settings_window")
+    SettingsWindow:show()
+    return true
+end
+
 function SimpleUIPlugin:onTeardown()
     -- Flush the plugin settings store so any in-memory writes are persisted
     -- before the plugin is unloaded or KOReader exits.
@@ -1086,6 +1208,7 @@ function SimpleUIPlugin:onTeardown()
         self._topbar_timer = nil
     end
     Patches.teardownAll(self)
+    pcall(function() QSBar.uninstall() end)
     I18n.uninstall()
     -- Give modules with internal upvalue caches a chance to nil them before
     -- their package.loaded entry is cleared — ensures the GC can collect the
@@ -1161,6 +1284,28 @@ function SimpleUIPlugin:onTeardown()
     if mod_rg and type(mod_rg.reset) == "function" then
         pcall(mod_rg.reset)
     end
+    -- Remove the "Book statistics" button from the Library browser and FileSearcher.
+    if FM and FM.instance and FM.instance.removeFileDialogButtons then
+        pcall(function() FM.instance:removeFileDialogButtons("sui_book_stats") end)
+    end
+    if FS and FS.file_dialog_added_buttons then
+        local idx = FS.file_dialog_added_buttons.index
+            and FS.file_dialog_added_buttons.index["sui_book_stats"]
+        if idx then
+            pcall(function()
+                table.remove(FS.file_dialog_added_buttons, idx)
+                FS.file_dialog_added_buttons.index["sui_book_stats"] = nil
+                for id, i in pairs(FS.file_dialog_added_buttons.index) do
+                    if i > idx then
+                        FS.file_dialog_added_buttons.index[id] = i - 1
+                    end
+                end
+                if #FS.file_dialog_added_buttons == 0 then
+                    FS.file_dialog_added_buttons = nil
+                end
+            end)
+        end
+    end
     local mod_bm = package.loaded["sui_browsemeta"]
     if mod_bm and type(mod_bm.reset) == "function" then
         pcall(mod_bm.reset)
@@ -1169,13 +1314,6 @@ function SimpleUIPlugin:onTeardown()
     -- (files replaced on disk without restarting KOReader) picks up new code
     -- on the next plugin load, instead of reusing the old in-memory versions.
     _menu_installer = nil
-    -- Nil buildTabItems so its upvalue cache (_tab_items_cache) is released,
-    -- and the patch can rebuild fresh on next plugin load.
-    SimpleUIPlugin.buildTabItems = nil
-    -- Clear the tab-injection flag so the patch can be re-applied if the
-    -- plugin is reloaded within the same KOReader session.
-    local fm_menu = package.loaded["apps/filemanager/filemanagermenu"]
-    if fm_menu then fm_menu.__sui_tab_patched = nil end
     -- Restore the ReaderStatistics:onSyncBookStats patch.
     local RS = package.loaded["plugins/statistics.koplugin/main"]
     if RS and RS._sui_sync_patched then
@@ -1306,7 +1444,12 @@ function SimpleUIPlugin:onResume()
             HS._instance._on_qa_tap = function(aid)
                 plugin_ref:_navigate(aid, plugin_ref.ui, Config.loadTabConfig(), false)
             end
-            HS.refresh(true)
+            -- Use keep_cache=false so that stats modules always re-fetch from
+            -- the DB on wakeup.  HomescreenWidget:onResume already issued a
+            -- stats-only _refresh, but this call (which fires slightly later in
+            -- the same resume chain) must not override it with a keep_cache=true
+            -- that reuses a potentially stale _ctx_cache.
+            HS.refresh(false)
         end
         -- Re-open the Homescreen on wakeup when \"Start with Homescreen\" is set.
         if SUISettings:nilOrTrue("simpleui_enabled") then
@@ -1356,7 +1499,11 @@ function SimpleUIPlugin:onCloseDocument()
             notice_mode = SUISettings:nilOrTrue("simpleui_hs_closing_notice") and "always" or "never"
         end
 
-        if notice_mode == "always"
+        -- Consume suppress flag unconditionally so it never leaks to a later close.
+        local suppress = self._suppress_closing_notice
+        self._suppress_closing_notice = nil
+
+        if (notice_mode == "always" and not suppress)
                 or (notice_mode == "gesture_only" and via_gesture) then
             -- UIManager:show() respects honor_silent_mode on InfoMessage, which
             -- means the notice is silently dropped when the Dispatcher has put
@@ -1442,6 +1589,13 @@ function SimpleUIPlugin:onCloseDocument()
 
     if stats_active then
         local SP = package.loaded["desktop_modules/module_stats_provider"]
+        -- Fall back to pcall require: the module may not be in package.loaded yet
+        -- if the homescreen was never opened this session (e.g. the user went
+        -- straight from boot to the reader without visiting the homescreen).
+        if not SP then
+            local ok_sp, m = pcall(require, "desktop_modules/module_stats_provider")
+            if ok_sp then SP = m end
+        end
         if SP then
             local status_changed = true  -- default: full invalidation (safe)
             if closed_fp and SP.invalidateTimeSeries then
@@ -1455,18 +1609,17 @@ function SimpleUIPlugin:onCloseDocument()
                     local s = cached and cached.summary
                     pre_status = type(s) == "table" and s.status or nil
                 end
-                -- Post-session status: one DS.open on the closed book only.
+                -- Post-session status: read from the in-memory doc_settings.
+                -- ReaderUI:onClose() calls saveSettings() (flush) before firing
+                -- CloseDocument, so doc_settings reflects the final on-disk state.
+                -- doc_settings is not destroyed until UIManager:close() → onCloseWidget,
+                -- which runs after this handler — so RUI.instance.doc_settings is
+                -- valid here. This avoids a DS.open (file-open + WAL header read).
                 local post_status
-                local ok_DS, DocSettings = pcall(require, "docsettings")
-                if ok_DS then
-                    local ok_ds, ds = pcall(function()
-                        return DocSettings:open(closed_fp)
-                    end)
-                    if ok_ds and ds then
-                        local s = ds:readSetting("summary")
-                        post_status = type(s) == "table" and s.status or nil
-                        pcall(function() ds:close() end)
-                    end
+                local RUI = package.loaded["apps/reader/readerui"]
+                if RUI and RUI.instance and type(RUI.instance.doc_settings) == "table" then
+                    local s = RUI.instance.doc_settings:readSetting("summary")
+                    post_status = type(s) == "table" and s.status or nil
                 end
                 -- Status changed only when a "complete" boundary was crossed.
                 -- Both nil/non-complete pre and post → counts are unaffected.
@@ -1580,6 +1733,11 @@ function SimpleUIPlugin:onCloseDocument()
                 HS._instance._ctx_cache.coverdeck_cur_idx = nil
             end
         else
+            -- HS not visible: discard the shared cached state so the next
+            -- Homescreen.show() is forced to call prefetchBooks() from scratch.
+            -- Without this, the stale _cached_books_state (non-nil) causes
+            -- _buildCtx() to skip prefetchBooks(), leaving the carousel with
+            -- the old history order until the user manually refreshes.
             HS._cached_books_state = nil
         end
         needs_refresh = true
