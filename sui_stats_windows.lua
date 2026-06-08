@@ -187,6 +187,44 @@ local function _fetchBookStatsData(book)
     highlights = tonumber(highlights) or 0
     notes      = tonumber(notes)      or 0
 
+    -- The DB highlights counter is updated incrementally (only counts
+    -- highlights added during active sessions after the book was first
+    -- registered).  For books with pre-existing annotations, or books
+    -- finished before SimpleUI 2.0, the counter under-counts.
+    -- Re-count directly from the sidecar bookmarks when fp is available,
+    -- mirroring ReaderAnnotation:getNumberOfHighlightsAndNotes() logic:
+    --   annotations with drawer ~= nil are highlights/notes;
+    --   those that also have note are notes, the rest are highlights.
+    if fp then
+        local ok_ds, DocSettings = pcall(require, "docsettings")
+        if ok_ds then
+            local ok_open, ds = pcall(function() return DocSettings:open(fp) end)
+            if ok_open and ds then
+                local bm = ds:readSetting("bookmarks")
+                if type(bm) == "table" then
+                    local hl_count, note_count = 0, 0
+                    for _, item in ipairs(bm) do
+                        if item.drawer then
+                            if item.note then
+                                note_count = note_count + 1
+                            else
+                                hl_count = hl_count + 1
+                            end
+                        end
+                    end
+                    -- Only override if the sidecar has any annotations; an
+                    -- empty table means the book was never opened with the
+                    -- annotation system active, so fall back to the DB value.
+                    if hl_count + note_count > 0 or highlights + notes == 0 then
+                        highlights = hl_count
+                        notes      = note_count
+                    end
+                end
+                pcall(function() ds:close() end)
+            end
+        end
+    end
+
     local MAX_SEC = 120
     pcall(function()
         local v = G_reader_settings and G_reader_settings:readSetting("statistics_max_sec")
