@@ -80,10 +80,88 @@ local _instanciable  = {}
 -- Built-ins in MODULES always precede externals in the final list.
 local _external      = {}
 
+local Registry = {}
+
+-- ---------------------------------------------------------------------------
+-- _placedInstanceIds()
+--
+-- Returns a set (table keyed by id, value true) of every module id that is
+-- actually placed somewhere in the current homescreen layout. This is the
+-- source of truth used to prune orphaned instanciable-module entries (rows
+-- that exist in "*_instances" lists but were never added to a page, or were
+-- removed from a page through a path that didn't call destroyInstance).
+--
+-- Reads "simpleui_layout" (pages[*].modules) when present, falling back to
+-- the flat "simpleui_hs_module_order" otherwise — mirroring the same
+-- sources sui_homescreen.lua uses to render the layout.
+-- ---------------------------------------------------------------------------
+local function _placedInstanceIds()
+    local placed = {}
+    local layout = SUISettings:readSetting("simpleui_layout")
+    if type(layout) == "table" and type(layout.pages) == "table" then
+        for _, page in ipairs(layout.pages) do
+            if type(page.modules) == "table" then
+                for _, mod_id in ipairs(page.modules) do
+                    placed[mod_id] = true
+                end
+            end
+        end
+    else
+        local order = SUISettings:readSetting("simpleui_hs_module_order")
+        if type(order) == "table" then
+            for _, mod_id in ipairs(order) do
+                placed[mod_id] = true
+            end
+        end
+    end
+    return placed
+end
+
+-- ---------------------------------------------------------------------------
+-- _pruneOrphanInstances(mod, placed)
+--
+-- For an instanciable module descriptor `mod`, removes any id from its
+-- persisted instances list (mod.instances_key, default
+-- "simpleui_qa_row_instances") that is not placed in the current layout
+-- (per _placedInstanceIds), and purges that instance's settings keys via
+-- Registry.purgeInstanceSettings.
+--
+-- Runs once per _load() — i.e. once per plugin lifetime — before instances
+-- are materialised, so stale ids never consume a display number or get
+-- re-instantiated.
+-- ---------------------------------------------------------------------------
+local function _pruneOrphanInstances(mod, placed)
+    local inst_key = mod.instances_key or "simpleui_qa_row_instances"
+    local inst_ids = SUISettings:readSetting(inst_key) or {}
+    if #inst_ids == 0 then return inst_ids end
+
+    local kept    = {}
+    local orphans = {}
+    for _, iid in ipairs(inst_ids) do
+        if placed[iid] then
+            kept[#kept + 1] = iid
+        else
+            orphans[#orphans + 1] = iid
+        end
+    end
+
+    if #orphans == 0 then return inst_ids end
+
+    SUISettings:set(inst_key, kept)
+
+    for _, iid in ipairs(orphans) do
+        Registry.purgeInstanceSettings(iid, "simpleui_hs_")
+        logger.dbg("simpleui: moduleregistry: pruned orphaned instance '" .. iid .. "' (key=" .. inst_key .. ")")
+    end
+
+    return kept
+end
+
 local function _load()
     if _loaded then return end
     _loaded = {}
     _by_id  = {}
+    local placed = _placedInstanceIds()
     -- ── Built-ins ────────────────────────────────────────────────────────────
     for _, def in ipairs(MODULES) do
         local ok, mod = pcall(require, def.require_mod)
@@ -91,10 +169,10 @@ local function _load()
             logger.warn("simpleui: moduleregistry: failed to load '" .. def.require_mod .. "': " .. tostring(mod))
         elseif mod then
             if mod.instanciable then
-                -- Dynamic-instance module: load persisted instance ids and
-                -- materialise one descriptor per instance.
-                local inst_key = mod.instances_key or "simpleui_qa_row_instances"
-                local inst_ids = SUISettings:readSetting(inst_key) or {}
+                -- Dynamic-instance module: prune orphaned instance ids, then
+                -- load the (now-clean) persisted instance ids and materialise
+                -- one descriptor per instance.
+                local inst_ids = _pruneOrphanInstances(mod, placed)
                 for _, iid in ipairs(inst_ids) do
                     local m = mod.makeInstance(iid)
                     if m and type(m.id) == "string" and not _by_id[m.id] then
@@ -137,8 +215,6 @@ local function _load()
         end
     end
 end
-
-local Registry = {}
 
 function Registry.list()
     _load(); return _loaded
