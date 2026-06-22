@@ -675,21 +675,27 @@ local function _updateNavpagerForHS(current_page, total_pages)
     UIManager:setDirty(tgt, "ui")
 end
 
--- Resolves a KOBO_VIRTUAL:// path to a real on-disk path by asking the kobo
--- plugin's VirtualLibrary to rebuild its path mappings if needed.
--- Returns the real path on success, or the original path unchanged so the
--- normal "file does not exist" error surfaces as usual.
-local function _resolveKoboVirtualPath(filepath)
-    if not filepath or filepath:sub(1, 14) ~= "KOBO_VIRTUAL:/" then
-        return filepath
-    end
+-- Normalises a filepath for use with the kobo.koplugin's patched
+-- DocumentRegistry.openDocument, which handles DRM decryption and provider
+-- selection only for KOBO_VIRTUAL:// paths.
+--
+-- Two cases are handled:
+--   • KOBO_VIRTUAL:// paths  — returned unchanged so DocumentRegistry's patch
+--     can perform decryption and route to the correct provider.
+--   • Real kepub paths (e.g. /mnt/onboard/.kobo/kepub/<id>) that were saved
+--     into ReadHistory by KOReader after the kobo.koplugin resolved a virtual
+--     path — converted back to KOBO_VIRTUAL:// so the same patch fires.
+--
+-- Any other path is returned unchanged.
+-- Falls back gracefully (returns filepath as-is) when kobo.koplugin is absent.
+local function _normalizeKoboPath(filepath)
+    if not filepath then return filepath end
     local ok, PluginLoader = pcall(require, "pluginloader")
     if not ok or not PluginLoader then return filepath end
     local kobo = PluginLoader:getPluginInstance("kobo_plugin")
     if not kobo or not kobo.virtual_library then return filepath end
     local vl = kobo.virtual_library
-    -- If the mapping table is empty the user has not yet opened the Kobo
-    -- Library folder this session — rebuild it now.
+    -- Ensure path mappings are populated (lazy-built on first access).
     if not next(vl.virtual_to_real) then
         local ok2, err = pcall(function() vl:buildPathMappings() end)
         if not ok2 then
@@ -697,8 +703,11 @@ local function _resolveKoboVirtualPath(filepath)
             return filepath
         end
     end
-    local real = vl:getRealPath(filepath)
-    return real or filepath
+    -- Already a virtual path — DocumentRegistry's patch will handle it.
+    if vl:isVirtualPath(filepath) then return filepath end
+    -- Real path from ReadHistory → convert back to virtual so decryption fires.
+    local virtual = vl:getVirtualPath(filepath)
+    return virtual or filepath
 end
 
 local function openBook(filepath, pos0, page)
@@ -707,7 +716,7 @@ local function openBook(filepath, pos0, page)
     local doOpen = function()
         local ReaderUI = package.loaded["apps/reader/readerui"]
             or require("apps/reader/readerui")
-        ReaderUI:showReader(_resolveKoboVirtualPath(filepath))
+        ReaderUI:showReader(_normalizeKoboPath(filepath))
         if pos0 or page then
             UIManager:scheduleIn(0.5, function()
                 local rui = package.loaded["apps/reader/readerui"]

@@ -27,6 +27,25 @@ local math_floor = math.floor
 local math_max   = math.max
 local math_min   = math.min
 
+-- Returns the KOBO_VIRTUAL:// path for a real kepub filepath when the
+-- kobo.koplugin is active, or the original filepath otherwise.
+-- This ensures that covers and sidecars are looked up via the virtual path
+-- (which the kobo.koplugin's BookInfoManager patch understands), and that
+-- openBook always passes a virtual path to DocumentRegistry so DRM
+-- decryption is triggered correctly.
+local function _koboVirtualPath(fp)
+    local ok, PluginLoader = pcall(require, "pluginloader")
+    if not ok or not PluginLoader then return fp end
+    local kobo = PluginLoader:getPluginInstance("kobo_plugin")
+    if not kobo or not kobo.virtual_library then return fp end
+    local vl = kobo.virtual_library
+    if vl:isVirtualPath(fp) then return fp end
+    if not next(vl.virtual_to_real) then
+        pcall(function() vl:buildPathMappings() end)
+    end
+    return vl:getVirtualPath(fp) or fp
+end
+
 local SH = {}
 
 -- ---------------------------------------------------------------------------
@@ -574,6 +593,12 @@ function SH.prefetchBooks(show_currently, show_recent, max_recent)
         local entry = ReadHistory.hist[i]
         local fp = entry and entry.file
         if fp and lfs.attributes(fp, "mode") == "file" then
+            -- Normalise to KOBO_VIRTUAL:// if this is a real kepub path saved
+            -- by the kobo.koplugin into ReadHistory. Using the virtual path as
+            -- the key ensures cover extraction and sidecar lookups go through
+            -- the kobo.koplugin's BookInfoManager patch, and that openBook
+            -- passes the correct path to DocumentRegistry for DRM decryption.
+            fp = _koboVirtualPath(fp)
             if i == 1 and show_currently then
                 -- Claim as currently-reading book.
                 state.current_fp = fp

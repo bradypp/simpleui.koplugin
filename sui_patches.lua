@@ -2644,17 +2644,23 @@ _raiseHSFromStack = function(plugin, prev_action)
     end
 
     -- Re-inject a fresh navbar for the new FM instance.
+    --
+    -- We must NOT call wrapWithNavbar here.  _navbar_inner points to the
+    -- FrameContainer placeholder that HomescreenWidget:init() installs as
+    -- self[1] before onShow() replaces the real content.  Using it as the
+    -- inner argument would produce a new OverlapGroup whose [1] is that
+    -- blank placeholder, painting the screen white.
+    --
+    -- The correct approach is to rebuild only the bottom-bar widget and
+    -- slot it into the *existing* _navbar_container (which already holds
+    -- the live HS content at [1]).  replaceBar does exactly that.
     local tabs = Config.loadTabConfig()
     Bottombar.setActiveAndRefreshFM(plugin, "homescreen", tabs)
     _ensureGoalCallback(plugin)
-    local navbar_container, wrapped, bar, topbar,
-          bar_idx, topbar_on, topbar_idx =
-              UI.wrapWithNavbar(hs_inst._navbar_inner, "homescreen", tabs, true)
-    UI.applyNavbarState(hs_inst, navbar_container, bar, topbar,
-                        bar_idx, topbar_on, topbar_idx, tabs)
+    local new_bar = Bottombar.buildBarWidget("homescreen", tabs)
+    Bottombar.replaceBar(hs_inst, new_bar, tabs)
     hs_inst._navbar_injected    = true
     hs_inst._navbar_prev_action = prev_action
-    hs_inst[1]                  = wrapped
 
     -- Refresh stale data (stats, progress, book order).
     hs_inst._on_qa_tap   = _makeQaTap(plugin)
