@@ -28,48 +28,36 @@ local SUISettings  = require("sui_store")
 -- is never registered in package.loaded under a predictable key. The path also
 -- differs between platforms (Kobo: relative "plugins/…", Linux deb/Android:
 -- absolute path under /usr/lib/koreader or the data dir). We try every known
--- location in order and cache the result so subsequent calls are free.
+-- strategy in order and cache the result so subsequent calls are free.
 local _rs_module_cache  -- nil = not yet resolved, false = not available
-local _RS_CANDIDATE_KEYS = {
-    "plugins/statistics.koplugin/main",  -- Kobo / relative working dir
-    "statistics.koplugin/main",          -- extra_plugin_paths installs
-    "statistics",                         -- hypothetical future short-name
-}
 
 local function _requireStatistics()
     if _rs_module_cache ~= nil then return _rs_module_cache or nil end
 
-    -- 1. Check package.loaded under every known key (free, no I/O).
-    for _, key in ipairs(_RS_CANDIDATE_KEYS) do
-        local m = package.loaded[key]
-        if m then
+    -- 1. Check package.loaded for any key containing "statistics.koplugin".
+    --    On Kobo the key is "plugins/statistics.koplugin/main"; on other
+    --    platforms it may differ, so we scan all loaded modules.
+    for key, m in pairs(package.loaded) do
+        if type(key) == "string" and key:find("statistics.koplugin", 1, true) then
             _rs_module_cache = m
             return m
         end
     end
 
-    -- 2. Ask PluginLoader for the live instance; from there we can reach the
-    --    class table via getmetatable(instance).__index (standard KOReader pattern).
-    local ok_pl, PluginLoader = pcall(require, "pluginloader")
-    if ok_pl and PluginLoader then
-        local instance = PluginLoader:getPluginInstance("statistics")
-        if instance then
-            -- The class table is the __index of the instance metatable.
-            local mt = getmetatable(instance)
-            local cls = mt and mt.__index
-            if cls then
-                _rs_module_cache = cls
-                return cls
+    -- 2. Scan package.path for a statistics.koplugin directory and dofile it,
+    --    exactly as PluginLoader does. This works on all platforms because
+    --    PluginLoader:loadPlugins() already added every plugin root to
+    --    package.path before SimpleUI:init() runs.
+    for path_entry in package.path:gmatch("[^;]+") do
+        -- path_entry looks like "/some/dir/statistics.koplugin/?.lua"
+        local plugin_root = path_entry:match("^(.*statistics%.koplugin)/")
+        if plugin_root then
+            local mainfile = plugin_root .. "/main.lua"
+            local ok, m = pcall(dofile, mainfile)
+            if ok and m then
+                _rs_module_cache = m
+                return m
             end
-        end
-    end
-
-    -- 3. Last resort: try require() with each candidate key.
-    for _, key in ipairs(_RS_CANDIDATE_KEYS) do
-        local ok, m = pcall(require, key)
-        if ok and m then
-            _rs_module_cache = m
-            return m
         end
     end
 
