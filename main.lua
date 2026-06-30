@@ -1516,6 +1516,14 @@ function SimpleUIPlugin:onSuspend()
         UIManager:unschedule(self._topbar_timer)
         self._topbar_timer = nil
     end
+    -- Flush any settings written via SUISettings:setNoFlush() (currently:
+    -- module_books_shared.lua's stale-books cache, refreshed in-memory on
+    -- every prefetchBooks() success but never fsync'd on that hot path —
+    -- see the WRITE COST / FLUSH COST notes there). Device suspend is
+    -- infrequent and off the reader-return critical path, so this is a
+    -- safe, low-cost point to make those writes durable across a full
+    -- KOReader process restart.
+    pcall(function() SUISettings:flush() end)
 end
 
 function SimpleUIPlugin:onResume()
@@ -1833,8 +1841,26 @@ function SimpleUIPlugin:onCloseDocument()
             end
         end
         -- Invalidate _cached_books_state so prefetchBooks() re-reads the
-        -- updated history order (closed book moves to position 1 = new centre).
-        -- Also reset the session index so the carousel returns to fps[1].
+        -- updated history order (closed book moves to position 1 = new centre)
+        -- on the next deferred _refresh() tick. Also reset the session index
+        -- so the carousel returns to fps[1] once fresh data lands.
+        --
+        -- Deliberately mirrors SP.invalidate() in module_stats_provider.lua:
+        -- that function clears only _cache_day (the "needs recompute" flag)
+        -- and explicitly does NOT touch _cache, so SP.getStale() keeps
+        -- returning the previous day's numbers for one frame after a
+        -- reading session ends — accepted as fine, since SP.get() overwrites
+        -- everything ~50ms later anyway. Earlier versions of this code tried
+        -- to eagerly fix HS._instance._ctx_cache.current_fp/recent_fps right
+        -- here via SH.peekRecentBooks(), to avoid the carousel/title showing
+        -- the previous book for that one frame — but that traded a few stat
+        -- syscalls per close for a guarantee that wasn't actually needed:
+        -- exactly like the stats case, _ctx_cache.current_fp/recent_fps
+        -- being one step stale for ~50ms is harmless, since the deferred
+        -- _refresh() tick (see _refresh()'s scheduleIn(0.05, ...) in
+        -- sui_homescreen.lua) unconditionally re-resolves both from a real
+        -- SH.prefetchBooks() call and repaints. So: touch nothing here,
+        -- exactly like SP.invalidate() touches nothing in _cache.
         if HS._instance then
             HS._instance._cached_books_state = nil
             if HS._instance._ctx_cache then

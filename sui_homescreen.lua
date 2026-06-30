@@ -2583,6 +2583,41 @@ function HomescreenWidget:_refresh(keep_cache, books_only, stats_only)
                         end
                     end
 
+                    -- Cold-open fix: onShow() seeds _cached_books_state with a
+                    -- best-effort stub via SH.getStaleBooks() — instant,
+                    -- zero-cost reuse of the last successful prefetchBooks()
+                    -- result (in-memory, or a single lazy disk read on a
+                    -- fresh process) — so the first paint can already show
+                    -- real covers/titles. That stub can still be incomplete
+                    -- or genuinely missing (e.g. the very first run ever,
+                    -- with no cache in memory or on disk), so an is_book_mod
+                    -- module (currently, coverdeck, recent) can still return
+                    -- nil/empty from build() on that first pass and never get
+                    -- a slot in _book_mod_slots. Now that the authoritative
+                    -- prefetchBooks() data has landed above, check for any
+                    -- such module and force a full rebuild so build() runs
+                    -- again with complete data (the in-place updateStats path
+                    -- below only touches slots that already exist, so a
+                    -- module that never got a slot would otherwise stay
+                    -- invisible until the next full _updatePage(false), e.g.
+                    -- a page turn). Cheap to check unconditionally — just an
+                    -- iteration over the small set of registered modules.
+                    do
+                        local missing_slot = false
+                        for _, mod in ipairs(Registry.list()) do
+                            if mod.is_book_mod
+                               and not self._book_mod_slots[mod.id]
+                               and Registry.isEnabled(mod, PFX) then
+                                missing_slot = true
+                                break
+                            end
+                        end
+                        if missing_slot then
+                            self:_updatePage(false)
+                            UIManager:setDirty(self, "ui")
+                        end
+                    end
+
                     -- 2. Obter novas estatísticas globais
                     local SP = _getStatsProvider()
                     if SP then
@@ -2637,17 +2672,30 @@ function HomescreenWidget:_refresh(keep_cache, books_only, stats_only)
                                     UIManager:setDirty(self, "ui")
                                 end
                             else
-                                -- Fallback: rebuild completo (módulo sem updateStats ou erro).
+                                -- Fallback: rebuild completo (módulo sem updateStats,
+                                -- ou updateStats devolveu false por identidade do
+                                -- livro ter mudado — ver module_currently/
+                                -- module_coverdeck.updateStats).
                                 local new_widget = slot.mod.build(slot.col_w, self._ctx_cache)
                                 if new_widget then
                                     if slot.has_menu then
                                         local wrapper = self._wrapper_pool[id]
                                         if wrapper then
                                             wrapper[1] = new_widget
+                                            -- BUGFIX: slot.widget tinha de ser atualizado
+                                            -- aqui também (mirroring _refreshBookModSlot),
+                                            -- senão o próximo updateStats(slot.widget, ctx)
+                                            -- continuava a operar sobre o widget antigo,
+                                            -- já desligado da árvore (sem efeito visível,
+                                            -- só desperdício de CPU em cada ciclo seguinte).
+                                            slot.widget = new_widget
                                             UIManager:setDirty(self, function() return "ui", wrapper.dimen, true end)
                                         end
                                     else
                                         slot.parent[slot.index] = new_widget
+                                        -- BUGFIX: ver nota acima — mesmo problema no
+                                        -- ramo sem menu.
+                                        slot.widget = new_widget
                                         UIManager:setDirty(self, function() return "ui", new_widget.dimen, true end)
                                     end
                                 end
@@ -2705,6 +2753,52 @@ function HomescreenWidget:_setCoverdeckIdx(idx)
     if self._ctx_cache then
         self._ctx_cache.coverdeck_cur_idx = idx
     end
+end
+
+-- ---------------------------------------------------------------------------
+-- _refreshBookModSlot — surgical, single-module repaint for is_book_mod
+-- modules (currently, coverdeck, recent) that need an immediate full
+-- rebuild outside the normal debounced _refresh() cycle — e.g. coverdeck's
+-- onTap/onSwipe handlers, which previously called _refreshImmediate(true)
+-- and paid for a full-page rebuild (every module on the homescreen,
+-- including stats/clock/quote/etc.) plus an UNSCOPED UIManager:setDirty(self,
+-- "ui") — that is, a dirty region covering the ENTIRE screen (self.dimen =
+-- {w=Screen:getWidth(), h=Screen:getHeight()}, see HomescreenWidget:init()),
+-- causing a full e-ink screen refresh/flash on every single swipe.
+--
+-- This mirrors the EXACT same in-place rebuild + scoped setDirty technique
+-- already used by the deferred async path inside _refresh() ("Fix 3" /
+-- Fallback branch above): rebuild just this module's widget via
+-- slot.mod.build(), splice it back into its slot (parent[index] or the
+-- has_menu wrapper), and call UIManager:setDirty with the new widget's own
+-- `dimen` instead of the whole-screen `self`. UIManager then only refreshes
+-- that widget's screen region on the next e-ink update — no other module
+-- repaints, no full-screen flash.
+--
+-- Returns true if the slot was found and repainted, false otherwise (caller
+-- should fall back to _refreshImmediate as a safety net — e.g. if the slot
+-- doesn't exist yet, build() returned nil, or anything is missing).
+function HomescreenWidget:_refreshBookModSlot(mod_id)
+    if not self._ctx_cache or not self._book_mod_slots then return false end
+    local slot = self._book_mod_slots[mod_id]
+    if not slot or not slot.mod or type(slot.mod.build) ~= "function" then return false end
+
+    local ok, new_widget = pcall(slot.mod.build, slot.col_w, self._ctx_cache)
+    if not ok or not new_widget then return false end
+
+    if slot.has_menu then
+        local wrapper = self._wrapper_pool and self._wrapper_pool[mod_id]
+        if not wrapper then return false end
+        wrapper[1] = new_widget
+        slot.widget = new_widget
+        UIManager:setDirty(self, function() return "ui", wrapper.dimen, true end)
+    else
+        if not slot.parent then return false end
+        slot.parent[slot.index] = new_widget
+        slot.widget = new_widget
+        UIManager:setDirty(self, function() return "ui", new_widget.dimen, true end)
+    end
+    return true
 end
 
 -- Immediate full rebuild — bypasses debounce. Used by showSettingsMenu's
@@ -2844,6 +2938,46 @@ function HomescreenWidget:onShow()
         Homescreen._stats_need_refresh = nil
         need_async = true
     end
+
+    -- Cold-open path: _cached_books_state is nil, so _buildCtx would call
+    -- prefetchBooks() (sidecar I/O for every recent book) and SP.get() (DB
+    -- queries) synchronously, blocking the first paint. This mirrors the
+    -- EXACT same pattern already used for reading_stats: _defer_stats below
+    -- makes _buildCtx call SP.getStale() — a zero-cost return of the last
+    -- DB query result, falling back to `{}` (zeros/placeholder for one
+    -- frame) when nothing has ever been cached — instead of SP.get(). The
+    -- equivalent here is SH.getStaleBooks(): an instant reference to the
+    -- last successful SH.prefetchBooks() result, now persisted across
+    -- process restarts too (see module_books_shared.lua), with NO
+    -- ReadHistory walk, NO lfs.attributes, NO sidecar cache lookups, NO new
+    -- work of any kind — just a table reference (or a single lazy disk
+    -- read, at most once per process). is_book_mod modules (currently,
+    -- coverdeck, recent) render with the exact same data they last had,
+    -- identical in spirit to how reading_stats never flashes to zero on
+    -- return.
+    --
+    -- getStaleBooks() returns nil only in the genuinely-first-ever-run case
+    -- (no in-memory cache AND no on-disk mirror — e.g. right after install,
+    -- or settings were cleared). Deliberately, NO active resolution (like
+    -- the previous SH.peekRecentBooks() fallback) is attempted in that
+    -- case: this mirrors SP.getStale() exactly, which has no equivalent
+    -- fallback either and simply lets reading_stats render `{}` for that
+    -- one frame. is_book_mod modules fall back to their own "no data yet"
+    -- path (build() returns nil/empty) the same way reading_stats shows
+    -- zeros — a single harmless frame, corrected by the deferred refresh
+    -- moments later, with zero extra work spent avoiding it.
+    --
+    -- need_async stays true regardless, so the full, authoritative
+    -- prefetchBooks() pass still runs ~50ms later via the deferred
+    -- _refresh() and corrects anything the stale data got wrong (book
+    -- finished, new book opened since the cache was built, etc.).
+    if not self._cached_books_state then
+        local SH = _getBookShared()
+        local stale = SH and SH.getStaleBooks and SH.getStaleBooks()
+        self._cached_books_state = stale or { current_fp = nil, recent_fps = {}, prefetched_data = {} }
+        need_async = true
+    end
+
     if self._navbar_container then
         local overlap = self:_initLayout()
         local old = self._navbar_container[1]

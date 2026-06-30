@@ -503,6 +503,23 @@ function M.build(w, ctx)
         _half_cw = half_cw,
     }
 
+    -- Surgical refresh after carousel navigation (tap/swipe): rebuilds and
+    -- repaints ONLY this coverdeck widget's screen region, instead of
+    -- _refreshImmediate(true)'s full-page rebuild + whole-screen setDirty
+    -- (HomescreenWidget.dimen covers the entire e-ink panel, so every swipe
+    -- previously triggered a full-screen flash even though only the
+    -- carousel's covers actually changed). Falls back to _refreshImmediate
+    -- when the surgical path is unavailable (older HS instance without the
+    -- method) or fails for any reason (e.g. slot missing, build() error),
+    -- so navigation never silently does nothing.
+    local function _navigateRefresh(hs)
+        if hs._refreshBookModSlot then
+            local ok = hs:_refreshBookModSlot("coverdeck")
+            if ok then return end
+        end
+        hs:_refreshImmediate(true)
+    end
+
     function tappable:onTap(_, ges)
         local x = ges.pos.x - self.dimen.x
         if x < self._mid - self._half_cw then
@@ -514,7 +531,7 @@ function M.build(w, ctx)
             end
             if self._hs then
                 self._hs:_setCoverdeckIdx(self._cur)
-                self._hs:_refreshImmediate(true)
+                _navigateRefresh(self._hs)
             end
         elseif x > self._mid + self._half_cw then
             -- Right side: next in LTR, previous in RTL.
@@ -525,7 +542,7 @@ function M.build(w, ctx)
             end
             if self._hs then
                 self._hs:_setCoverdeckIdx(self._cur)
-                self._hs:_refreshImmediate(true)
+                _navigateRefresh(self._hs)
             end
         else
             if self._open_fn then self._open_fn(self._fps[self._cur]) end
@@ -543,14 +560,14 @@ function M.build(w, ctx)
             self._cur = (self._cur - 2 + self._count) % self._count + 1
             if self._hs then
                 self._hs:_setCoverdeckIdx(self._cur)
-                self._hs:_refreshImmediate(true)
+                _navigateRefresh(self._hs)
             end
             return true
         elseif dir == "west" then
             self._cur = self._cur % self._count + 1
             if self._hs then
                 self._hs:_setCoverdeckIdx(self._cur)
-                self._hs:_refreshImmediate(true)
+                _navigateRefresh(self._hs)
             end
             return true
         end
@@ -750,6 +767,27 @@ function M.updateStats(widget, ctx)
     
     local fp = actual_widget._center_fp
     if not fp then return false end
+
+    -- BUGFIX: the widget only carries data for the carousel's centre book
+    -- at the time it was built (_center_fp). The underlying list/order can
+    -- change between renders (different book closed, swipe state reset,
+    -- "show finished" toggled, TBR list changed, etc.) without the centre
+    -- fp itself becoming nil — in-place patching would then silently
+    -- refresh the WRONG book's stats while the carousel keeps showing the
+    -- old centre cover/title. Recompute the same centre fp build() would
+    -- produce (cheap: table ops only, same getFps()/getSource() helpers,
+    -- no I/O — mirrors module_recent.updateStats()'s identity check) and
+    -- force a full rebuild on any mismatch.
+    do
+        local c        = ctx.cfg and ctx.cfg.coverdeck
+        local source   = c and c.source or getSource(ctx.pfx)
+        local fps      = getFps(source, ctx)
+        local count    = fps and #fps or 0
+        local cur_idx  = ctx.coverdeck_cur_idx or 1
+        if count > 0 and cur_idx > count then cur_idx = 1 end
+        local expected_center_fp = count > 0 and fps[cur_idx] or nil
+        if expected_center_fp ~= fp then return false end
+    end
 
     local bstats
     local pre = ctx.coverdeck_center_stats

@@ -1582,6 +1582,17 @@ function M.updateStats(widget, ctx)
     local fp = actual_widget._fp
     if not fp then return false end
 
+    -- BUGFIX: the widget only carries data for the book it was built with
+    -- (_fp). If ctx.current_fp now points to a DIFFERENT book — e.g. the
+    -- user closed a book that wasn't already showing in "Currently
+    -- Reading" — patching stats in-place would silently refresh the WRONG
+    -- book's numbers while leaving the old book's cover/title on screen.
+    -- Force a full rebuild (return false) so module_currently.build() runs
+    -- again with the new ctx.current_fp and replaces the widget entirely,
+    -- mirroring the identity check module_recent.updateStats() already
+    -- does for its own fp list.
+    if ctx.current_fp ~= fp then return false end
+
     local bstats
     local pre = ctx.currently_book_stats
     if pre and pre.fp == fp then
