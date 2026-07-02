@@ -1545,7 +1545,6 @@ function HomescreenWidget:_buildCtx()
                 title_pos     = SUISettings:readSetting(PFX .. "coverdeck_title_pos") or "below",
                 show_finished = SUISettings:readSetting(PFX .. "coverdeck_show_finished") == true,
                 show = {
-                    title    = SUISettings:nilOrTrue(PFX .. "coverdeck_show_title"),
                     author   = SUISettings:nilOrTrue(PFX .. "coverdeck_show_author"),
                     progress = SUISettings:nilOrTrue(PFX .. "coverdeck_show_progress"),
                     percent  = SUISettings:nilOrTrue(PFX .. "coverdeck_show_percent"),

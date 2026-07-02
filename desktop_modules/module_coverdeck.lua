@@ -130,7 +130,6 @@ local function getVisibleElements(pfx)
         if _showElem(pfx, key) then has_stat = true; break end
     end
     return {
-        title       = _showElem(pfx, "title"),
         progress    = _showElem(pfx, "progress"),
         has_stat    = has_stat,
         stats_order = stats_order,
@@ -410,7 +409,6 @@ function M.build(w, ctx)
             if c.show[key] then has_stat = true; break end
         end
         vis = {
-            title       = c.show.title,
             progress    = c.show.progress,
             has_stat    = has_stat,
             stats_order = stats_order,
@@ -418,9 +416,10 @@ function M.build(w, ctx)
     else
         vis = getVisibleElements(pfx)
     end
-    local show_title    = vis.title
-    local show_progress = vis.progress
-    local stats_order   = vis.stats_order
+    local title_pos      = c and c.title_pos or getTitlePos(pfx)
+    local show_title     = title_pos ~= "hidden"
+    local show_progress  = vis.progress
+    local stats_order    = vis.stats_order
 
     -- Carousel dimensions
     local center_w = math.floor(Screen:scaleBySize(140) * cs)
@@ -584,7 +583,6 @@ function M.build(w, ctx)
     local title_fs  = math.floor(SUIStyle.FS_TITLE  * scale * lbl_scale)
     local info_fs   = math.floor(SUIStyle.FS_DETAIL * scale * lbl_scale)
     local bar_h     = math.max(1, math.floor(Screen:scaleBySize(8) * scale))
-    local title_pos = c and c.title_pos or getTitlePos(pfx)
     local face_title = Font:getFace(SUIStyle.FACE_REGULAR, math.max(8, title_fs))
     local face_info  = Font:getFace(SUIStyle.FACE_REGULAR, math.max(7, info_fs))
 
@@ -840,20 +838,25 @@ function M.getHeight(ctx)
             if _ELEM_LABELS[key] and c.show[key] then has_stat = true; break end
         end
         vis = {
-            title    = c.show.title,
             progress = c.show.progress,
             has_stat = has_stat,
         }
     else
         vis = getVisibleElements(pfx)
     end
+    local title_pos  = c and c.title_pos or getTitlePos(pfx)
+    local show_title = title_pos ~= "hidden"
 
     local center_w = math.floor(Screen:scaleBySize(140) * scale * thumb_scale)
     local center_h = math.floor(center_w * 3 / 2)
     local h        = center_h + 2  -- TOP_CLEAR
 
-    if vis.title then
-        h = h + math.floor(Screen:scaleBySize(16) * scale * lbl_scale) + PAD2
+    if show_title then
+        -- Must mirror the face size used for title_widget in build() (FS_TITLE,
+        -- not a hardcoded 16px) or the reserved height undershoots the real
+        -- rendered text and the title gets clipped by the module's frame.
+        local title_fs = math.floor(SUIStyle.FS_TITLE * scale * lbl_scale)
+        h = h + math.max(8, title_fs) + PAD2
     end
 
     local has_meta = false
@@ -884,13 +887,17 @@ function M.getMenuItems(ctx_menu)
     local _UIManager = ctx_menu.UIManager
     local SortWidget = ctx_menu.SortWidget
 
-    local function toggle_item(label, key)
+    -- hide_in_sui should only be true for items that have an equivalent
+    -- control inside items_item.sui_build (currently: the 4 stats). Title
+    -- and Progress bar have no SUI-native replacement, so hiding them here
+    -- would leave the user with no way to toggle them from the SUI window.
+    local function toggle_item(label, key, hide_in_sui)
         return {
             text           = _lc(label),
             checked_func   = function() return _showElem(pfx, key) end,
             keep_menu_open = true,
             callback       = function() _toggleElem(pfx, key); refresh() end,
-            sui_hidden     = ctx_menu.is_sui or nil,
+            sui_hidden     = (hide_in_sui and ctx_menu.is_sui) or nil,
         }
     end
 
@@ -967,14 +974,21 @@ function M.getMenuItems(ctx_menu)
                     refresh()
                 end,
             },
+            {
+                text         = _lc("Hidden"), radio = true,
+                checked_func = function() return getTitlePos(pfx) == "hidden" end,
+                keep_menu_open = true,
+                callback     = function()
+                    SUISettings:saveSetting(pfx .. SETTING_TITLE_POS, "hidden")
+                    refresh()
+                end,
+            },
         },
     }
 
     local items_item = {
         text = _lc("Items"),
         sub_item_table = {
-            toggle_item("Title",        "title"),
-            toggle_item("Progress bar", "progress"),
             {
                 text      = _lc("Arrange Statistics"),
                 separator = true,
@@ -1010,10 +1024,10 @@ function M.getMenuItems(ctx_menu)
                     })
                 end,
             },
-            toggle_item("Percentage read",  "percent"),
-            toggle_item("Days of reading",  "book_days"),
-            toggle_item("Time read",        "book_time"),
-            toggle_item("Time remaining",   "book_remaining"),
+            toggle_item("Percentage read",  "percent",        true),
+            toggle_item("Days of reading",  "book_days",      true),
+            toggle_item("Time read",        "book_time",      true),
+            toggle_item("Time remaining",   "book_remaining", true),
         },
             sui_build = ctx_menu.is_sui and function(ctx, _item)
                 local SUIWindow = require("sui_window")
@@ -1115,6 +1129,15 @@ function M.getMenuItems(ctx_menu)
     local menu = {}
     menu[#menu+1] = source_item
     menu[#menu+1] = items_item
+    menu[#menu+1] = {
+        text           = _lc("Show status bar"),
+        checked_func   = function() return _showElem(pfx, "progress") end,
+        keep_menu_open = true,
+        callback       = function()
+            _toggleElem(pfx, "progress")
+            refresh()
+        end,
+    }
     for _i, item in ipairs(scale_items) do menu[#menu+1] = item end
     menu[#menu+1] = title_pos_item
     menu[#menu+1] = {

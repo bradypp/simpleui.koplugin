@@ -1483,6 +1483,7 @@ msgstr ""
 #: sui_menu.lua:3166
 #: sui_menu.lua:3197
 #: desktop_modules/module_collections.lua:932
+#: desktop_modules/module_coverdeck.lua:978
 msgid "Hidden"
 msgstr ""
 
@@ -3151,6 +3152,10 @@ msgstr ""
 
 #: sui_config.lua:925
 msgid "Show section label"
+msgstr ""
+
+#: desktop_modules/module_coverdeck.lua:1133
+msgid "Show status bar"
 msgstr ""
 
 #: sui_menu.lua:2272

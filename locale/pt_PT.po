@@ -1334,6 +1334,7 @@ msgstr ""
 #: sui_menu.lua:2834 sui_menu.lua:2874 sui_menu.lua:2880 sui_menu.lua:2891
 #: sui_menu.lua:2928 sui_menu.lua:2934 sui_menu.lua:2945 sui_menu.lua:3166
 #: sui_menu.lua:3197 desktop_modules/module_collections.lua:932
+#: desktop_modules/module_coverdeck.lua:978
 msgid "Hidden"
 msgstr "Oculto"
 
@@ -2987,6 +2988,10 @@ msgstr "Mostrar livros terminados"
 #: sui_config.lua:925
 msgid "Show section label"
 msgstr "Mostrar rótulo de secção"
+
+#: desktop_modules/module_coverdeck.lua:1133
+msgid "Show status bar"
+msgstr "Mostrar barra de estado"
 
 #: sui_menu.lua:2272
 msgid "Show wallpaper on all screens"

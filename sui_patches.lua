@@ -1788,9 +1788,8 @@ function M.patchUIManagerClose(plugin)
         -- ────────────────────────────────────────────────────────────────────
 
         -- The homescreen is closed on FM exit via SimpleUIPlugin:onCloseWidget,
-        -- which mirrors the Bookshelf plugin pattern and uses self.ui.tearing_down
-        -- as the discriminator (set only when the reader is opening, not on exit).
-        -- Nothing to do here.
+        -- which uses self.ui.tearing_down as the discriminator (set only when
+        -- the reader is opening, not on exit). Nothing to do here.
 
         local result = orig_close(um_self, widget, ...)
 
@@ -2754,11 +2753,10 @@ _raiseHSFromStack = function(plugin, prev_action)
     hs_inst._on_goal_tap = plugin._goalTapCallback
     pcall(function() hs_inst:_refresh(false) end)
 
-    -- Scope the dirty region to the widget's own dimen (same approach as
-    -- Bookshelf:_raiseInPlace). On colour panels, a full-screen "ui" dirty
-    -- can be promoted to a full flash by the EPDC driver; the dimen-scoped
-    -- form stays as a "ui" waveform and merges cleanly with the single
-    -- repaint queued by the caller.
+    -- Scope the dirty region to the widget's own dimen instead of the full
+    -- screen. On colour panels, a full-screen "ui" dirty can be promoted to
+    -- a full flash by the EPDC driver; the dimen-scoped form stays as a "ui"
+    -- waveform and merges cleanly with the single repaint queued by the caller.
     UIManager:setDirty(hs_inst, function()
         return "ui", hs_inst.dimen
     end)
@@ -2860,7 +2858,7 @@ function M.closeReaderToHomescreen(plugin, via_gesture)
         _prepareReaderClose(plugin, readerui, via_gesture)
 
     -- -----------------------------------------------------------------------
-    -- Flash elimination — mirror of Bookshelf:_safeShow() (#35 equivalent).
+    -- Flash elimination (#35 equivalent).
     --
     -- Previous sequence (caused FM flash):
     --   readerui:onClose()        → queues UIManager:close(self.dialog, "full")
@@ -3708,6 +3706,32 @@ function M.installAll(plugin)
     if ok_bm and BM and BM.isEnabled() then pcall(BM.install) end
     -- Wallpaper in FM and fullscreen overlay surfaces.
     M.patchWallpaperFM(plugin)
+
+    -- ------------------------------------------------------------------
+    -- Reader-only patches.
+    --
+    -- installAll runs once per SimpleUIPlugin instantiation, and KOReader
+    -- instantiates one plugin per host UI — both the FileManager AND the
+    -- ReaderUI call SimpleUIPlugin:init() (hence installAll) separately.
+    -- wireReaderMenuFMTab / patchReloadDocument only make sense when
+    -- plugin.ui is a ReaderUI, so guard on plugin.ui.document, a field
+    -- only ReaderUI instances have (FileManager has no .document).
+    --
+    -- BUG FIX: these two were previously defined but never called from
+    -- anywhere, meaning the reader's "File browser" menu tab kept its
+    -- native callback instead of ours. That callback closes the reader
+    -- via readerui:onClose() directly, without going through
+    -- _prepareReaderClose (which sets readerui.tearing_down = true).
+    -- Without that flag, SimpleUIPlugin:onCloseWidget's real-exit guard
+    -- misfires on the CloseWidget broadcast and tears down the suspended
+    -- Homescreen, leaving the bare FileManager exposed once showFileManager
+    -- runs — i.e. exactly the "opens the library instead of the homescreen"
+    -- symptom.
+    -- ------------------------------------------------------------------
+    if plugin.ui and plugin.ui.document then
+        M.wireReaderMenuFMTab(plugin, plugin.ui)
+        M.patchReloadDocument(plugin, plugin.ui)
+    end
 end
 
 function M.teardownAll(plugin)
