@@ -61,6 +61,7 @@ M.ICON = {
     library        = _P .. "library.svg",
     collections    = _P .. "collections.svg",
     history        = _P .. "history.svg",
+    recent         = _P .. "recent.svg",
     continue_      = _P .. "continue.svg",       -- trailing _ avoids clash with Lua keyword
     frontlight     = _P .. "frontlight.svg",
     night          = _P .. "night.svg",
@@ -115,6 +116,7 @@ M.ALL_ACTIONS = {
     { id = "homescreen",       label = _("Home"),             icon = M.ICON.ko_home     },
     { id = "collections",      label = _("Collections"),      icon = M.ICON.collections },
     { id = "history",          label = _("History"),          icon = M.ICON.history     },
+    { id = "recent",           label = _("Recent"),           icon = M.ICON.recent      },
     { id = "continue",         label = _("Continue"),         icon = M.ICON.continue_   },
     { id = "favorites",        label = _("Favorites"),        icon = M.ICON.ko_star     },
     { id = "bookmark_browser", label = _("Bookmarks"),        icon = M.ICON.ko_bookmark },

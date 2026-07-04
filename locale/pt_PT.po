@@ -227,6 +227,10 @@ msgstr "Todos os itens já foram adicionados."
 msgid "All modules have already been added."
 msgstr "Todos os módulos já foram adicionados."
 
+#: sui_recent_window.lua:153
+msgid "All recent books are finished."
+msgstr "Todos os livros recentes estão concluídos."
+
 #: desktop_modules/module_reading_stats.lua:92
 msgid "All time — Books"
 msgstr "Total — Livros"
@@ -2072,6 +2076,10 @@ msgstr "Nenhuma predefinição encontrada."
 msgid "No quotes found."
 msgstr "Nenhuma citação encontrada."
 
+#: sui_recent_window.lua:130
+msgid "No recent books."
+msgstr "Sem livros recentes."
+
 #: sui_stats_windows.lua:142 sui_stats_windows.lua:177
 #: sui_stats_windows.lua:2527
 msgid "No statistics found for this book."
@@ -2544,12 +2552,20 @@ msgstr "Estatísticas de Leitura"
 msgid "Reboot"
 msgstr "Reiniciar"
 
+#: sui_quickactions.lua:634 sui_config.lua:119 sui_recent_window.lua:197
+msgid "Recent"
+msgstr "Recentes"
+
 #: sui_presets.lua:137 sui_presets.lua:172 sui_presets.lua:230
 #: desktop_modules/module_recent.lua:69 desktop_modules/module_recent.lua:70
 #: desktop_modules/module_recent.lua:81 desktop_modules/module_recent.lua:541
 #: desktop_modules/module_coverdeck.lua:1038
 msgid "Recent Books"
 msgstr "Livros Recentes"
+
+#: sui_quickactions.lua:646
+msgid "Recent not available."
+msgstr "Recentes não disponíveis."
 
 #: desktop_modules/module_tbr.lua:294
 msgid "Remove from To Be Read"
@@ -3067,6 +3083,10 @@ msgstr "Simple UI: Ir para o Ecrã Inicial"
 #: main.lua:875
 msgid "Simple UI: Go to Library"
 msgstr "Simple UI: Ir para a Biblioteca"
+
+#: main.lua:893
+msgid "Simple UI: Recent"
+msgstr "Simple UI: Recentes"
 
 #: main.lua:887
 msgid "Simple UI: Settings"

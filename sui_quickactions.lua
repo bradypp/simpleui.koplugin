@@ -630,6 +630,24 @@ local function _registerBuiltins()
             end,
         },
         {
+            id    = "recent",
+            label = _("Recent"),
+            icon  = Config.ICON.recent,
+            is_in_place = true,
+            execute = function(ctx)
+                local plugin = ctx.plugin or _simpleui_plugin()
+                local su     = ctx.show_unavailable or _unavailToast
+                local ok, RW = pcall(require, "sui_recent_window")
+                if ok and RW and RW.show then
+                    QA.trackIndicatorViaCallback(plugin, "recent", function(restore)
+                        RW.show(restore)
+                    end)
+                else
+                    su(_("Recent not available."))
+                end
+            end,
+        },
+        {
             id    = "continue",
             label = _("Continue"),
             icon  = Config.ICON.continue_,

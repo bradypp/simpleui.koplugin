@@ -887,6 +887,12 @@ function SimpleUIPlugin:init()
         title    = _("Simple UI: Settings"),
         general  = true,
     })
+    Dispatcher:registerAction("simpleui_recent_window", {
+        category = "none",
+        event    = "SimpleUIRecentWindow",
+        title    = _("Simple UI: Recent"),
+        general  = true,
+    })
 
 
         -- -------------------------------------------------------------------
@@ -1317,6 +1323,12 @@ end
 function SimpleUIPlugin:onSimpleUISettingsWindow()
     local SettingsWindow = require("sui_settings_window")
     SettingsWindow:show()
+    return true
+end
+
+function SimpleUIPlugin:onSimpleUIRecentWindow()
+    local ok, RW = pcall(require, "sui_recent_window")
+    if ok and RW and RW.show then RW.show() end
     return true
 end
 
