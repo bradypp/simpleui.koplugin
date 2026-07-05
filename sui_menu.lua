@@ -2370,6 +2370,18 @@ SimpleUIPlugin.addToMainMenu = function(self, menu_items)
                 end,
             },
             {
+                text           = _("Close Book Before Sleep"),
+                help_text      = _("When suspending while reading, close the current book and show the Simple UI Home Screen before the device sleeps."),
+                checked_func   = function()
+                    return SUISettings:isTrue("simpleui_hs_close_reader_before_suspend")
+                end,
+                keep_menu_open = true,
+                callback       = function()
+                    SUISettings:saveSetting("simpleui_hs_close_reader_before_suspend",
+                        not SUISettings:isTrue("simpleui_hs_close_reader_before_suspend"))
+                end,
+            },
+            {
                 text           = _("Return to Home Screen on Wakeup"),
                 help_text      = _("When waking the device from sleep/suspend, always return to the Home Screen — even if a book was open when it went to sleep."),
                 checked_func   = function()

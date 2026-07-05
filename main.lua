@@ -1555,7 +1555,15 @@ function SimpleUIPlugin:onSuspend()
     -- (e.g. autosuspend can race with a reader teardown on some Kobo builds),
     -- so we capture the truth here, while the world is still settled.
     local RUI = package.loaded["apps/reader/readerui"]
-    self._simpleui_reader_was_active = (RUI and RUI.instance) and true or false
+    local reader_active = (RUI and RUI.instance) and true or false
+    if reader_active and SUISettings:isTrue("simpleui_hs_close_reader_before_suspend") then
+        local ok_p, patches = pcall(require, "sui_patches")
+        if ok_p and patches and patches.closeReaderToHomescreenNow then
+            patches.closeReaderToHomescreenNow(self, false, true, true)
+            reader_active = false
+        end
+    end
+    self._simpleui_reader_was_active = reader_active
     if self._topbar_timer then
         UIManager:unschedule(self._topbar_timer)
         self._topbar_timer = nil

@@ -1362,6 +1362,7 @@ function M.applyFirstRunDefaults()
     def(PFX .. "coverdeck_show_book_time",      false)
     def(PFX .. "coverdeck_show_book_remaining", false)
     def(PFX .. "recent_show_finished",          true)
+    def(PFX .. "close_reader_before_suspend",   false)
 
     -- Updater
     def("simpleui_updater_auto_check",          true)

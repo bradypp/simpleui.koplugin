@@ -2901,6 +2901,19 @@ function M.closeReaderToHomescreen(plugin, via_gesture)
     end)
 end
 
+function M.closeReaderToHomescreenNow(plugin, via_gesture, force_homescreen, suppress_notice)
+    if via_gesture == nil then via_gesture = false end
+    local RUI = package.loaded["apps/reader/readerui"]
+    if not (RUI and RUI.instance) then return end
+    local readerui = RUI.instance
+    if suppress_notice then plugin._suppress_closing_notice = true end
+    local file, return_to_folder, prev_action =
+        _prepareReaderClose(plugin, readerui, via_gesture)
+    if force_homescreen then return_to_folder = false end
+    _closeReaderToHomescreenSync(plugin, readerui, file,
+                                 return_to_folder, prev_action)
+end
+
 -- ---------------------------------------------------------------------------
 -- wireReaderMenuFMTab
 --
